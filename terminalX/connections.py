@@ -1,8 +1,10 @@
 import paramiko
 import pyte
 from dataclasses import dataclass, field, replace
+import threading
 import time
-from .types import DisabledAlgorithms, EnvironmentDict, File, Generator
+from .types import DisabledAlgorithms, StringDict, File
+from typing import  Generator, List, Tuple
 
 
 class NotConnectedException(BaseException):
@@ -20,7 +22,7 @@ class Client:
     username: str = None
     key_filename: File = None
     timeout: int = None
-    allow_agent: bool = True
+    allow_agent: bool = False           # True when https://github.com/paramiko/paramiko/pull/2010 is merged
     look_for_keys: bool = True,
     compress: bool = False
     gss_auth: bool = False
@@ -32,8 +34,8 @@ class Client:
     auth_timeout: float = None
     disabled_algorithms: DisabledAlgorithms = None
     host_keys_file: File = None
-    term: str = 'xterm'
-    environment: EnvironmentDict = None
+    term: str = 'linux'
+    environment: StringDict = None
     keepalive_interval: int = None
     x11: bool = True
     x11_screen_number: int = 0
@@ -52,6 +54,8 @@ class Client:
     transport: paramiko.Transport = field(init=False, repr=False, hash=False, compare=False, default=None)
     screen: pyte.Screen = field(init=False, repr=False, hash=False, compare=False, default=None)
     stream: pyte.Stream = field(init=False, repr=False, hash=False, compare=False, default=None)
+    receive_thread: threading.Thread = field(init=False, repr=False, hash=False, compare=False, default=None)
+    shell_active: threading.Event = field(init=False, repr=False, hash=False, compare=False, default_factory=threading.Event)
 
     def connect(self, passphrase: str = None, password: str = None) -> None:
         """
@@ -71,7 +75,6 @@ class Client:
             self.ssh_client.load_host_keys(self.host_keys_file)
         else:
             self.ssh_client.load_system_host_keys()
-        self.ssh_client.load_system_host_keys(host_keys_file)
         self.ssh_client.connect(self.host, port=self.port, username=self.username, password=password,
                                 key_filename=self.key_filename, timeout=self.timeout,
                                 allow_agent=self.allow_agent, look_for_keys=self.look_for_keys, compress=self.compress,
@@ -96,12 +99,15 @@ class Client:
         if self.x11:
             self.ssh_shell.request_x11(screen_number=self.x11_screen_number, auth_protocol=self.x11_auth_protocol)
         self.screen = pyte.HistoryScreen(80, 24, history=history)
-        self.stream = pyte.Stream(screen)
+        self.stream = pyte.Stream(self.screen)
+        self.shell_active.set()
+        self.receive_thread = threading.Thread(target=self.receive_always)
+        self.receive_thread.start()
 
     def reconnect_existing(self, sock):
         self.ssh_client.connect(self.host, sock=sock)
 
-    def duplicate(self) -> Client:
+    def duplicate(self) -> 'Client':
         """
         Raises:
         BadHostKeyException – if the server’s host key could not be verified
@@ -120,37 +126,38 @@ class Client:
             raise NotConnectedException
         sock = self.transport.sock
         client = replace(self)
-        client.connect_existing(sock)
+        client.reconnect_existing(sock)
         return client
 
     def send(self, text: str):
         if not self.ssh_shell:
             raise NoShellException
-        self.ssh_shell.send(text.encode())
-        self.receive()
+        self.ssh_shell.sendall(text.encode('utf-8'))
 
     def receive(self):
-        if not self.ssh_shell:
-            raise NoShellException
-        if self.ssh_shell.recv_ready():
-            data = self.ssh_shell.recv(9999)
+        data = self.ssh_shell.recv(9999)
+        if data:
             self.stream.feed(data.decode())
 
     def receive_always(self, interval: int = 0.25):
-        while True:
+        if not self.ssh_shell:
+            raise NoShellException
+        while self.shell_active.is_set():
             self.receive()
-            time.sleep(interval)
 
     def display_screen(self) -> List[str]:
         if self.screen:
-            return screen.display
+            return self.screen.display
         return []
 
-    def display_screen_as_test(self) -> str:
+    def cursors(self) -> Tuple[int, int]:
+        return self.screen.cursor.x, self.screen.cursor.y
+
+    def display_screen_as_text(self) -> str:
         display = self.display_screen()
         return '\n'.join(display)
 
-    def parallel_sftp(self) -> Client:
+    def parallel_sftp(self) -> 'Client':
         client = self.duplicate()
         client.ssh_client.open_sftp()
         return client
@@ -173,6 +180,7 @@ class Client:
 
     def close(self):
         self.ssh_client.close()
+        self.shell_active.clear()
 
     def save(self):
         pass
