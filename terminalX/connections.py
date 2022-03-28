@@ -3,8 +3,10 @@ import pyte
 from dataclasses import dataclass, field, replace
 import threading
 import time
-from .types import DisabledAlgorithms, StringDict, File
-from typing import  Generator, List, Tuple
+
+from .forwarder import forward_tunnel, ForwardServer
+from .types import DisabledAlgorithms, StringDict, File, KnownHostsPolicy, TunnelConfig
+from typing import Dict, Generator, List, Tuple
 
 
 class NotConnectedException(BaseException):
@@ -30,7 +32,7 @@ class Client:
     gss_deleg_creds: bool = False,
     gss_host: str = None
     gss_trust_dns: bool = True
-    banner_timeout: float = None,
+    banner_timeout: float = None
     auth_timeout: float = None
     disabled_algorithms: DisabledAlgorithms = None
     host_keys_file: File = None
@@ -40,13 +42,16 @@ class Client:
     x11: bool = True
     x11_screen_number: int = 0
     x11_auth_protocol: str = "MIT-MAGIC-COOKIE-1"
+    known_hosts_policy: KnownHostsPolicy = "auto"
     jump_host: str = None
     jump_port: int = 22
     jump_username: str = None
     socks_host: str = None
     socks_port: int = None
     socks_username: str = None
-
+    tunnels: List[TunnelConfig] = field(default_factory=list)
+    forward_tunnels: List[ForwardServer] = field(init=False, repr=False, hash=False, compare=False,
+                                                 default_factory=list)
     ssh_client: paramiko.SSHClient = field(init=False, repr=False, hash=False, compare=False,
                                            default_factory=paramiko.SSHClient)
     sftp_client: paramiko.SFTPClient = field(init=False, repr=False, hash=False, compare=False, default=None)
@@ -71,6 +76,7 @@ class Client:
         Raises:
         socket.error – if a socket error occurred while connecting
         """
+        self.set_known_hosts_policy()
         if self.host_keys_file:
             self.ssh_client.load_host_keys(self.host_keys_file)
         else:
@@ -85,6 +91,26 @@ class Client:
         self.transport = self.ssh_client.get_transport()
         if self.keepalive_interval:
             self.transport.set_keepalive(self.keepalive_interval)
+        for t in self.tunnels:
+            self.setup_tunnel(t)
+
+    def setup_tunnel(self, tunnel: TunnelConfig):
+        forward_server = forward_tunnel(tunnel['src'][1], tunnel['dst'][0], tunnel['dst'][1], self.transport,
+                                        tunnel['src'][0])
+        self.forward_tunnels.append(forward_server)
+
+    def wait_started(self):
+        for server in self.forward_tunnels:
+            server.wait_started(10)
+
+    def set_known_hosts_policy(self):
+        policies = {
+            'reject': paramiko.RejectPolicy,
+            'auto': paramiko.AutoAddPolicy,
+            'warn': paramiko.WarningPolicy
+        }
+        policy = policies[self.known_hosts_policy]
+        self.ssh_client.set_missing_host_key_policy(policy)
 
     def invoke_shell(self, width: int = 80, height: int = 24, width_pixels: int = 0, height_pixels: int = 0,
                      history: int = 100):
@@ -179,6 +205,8 @@ class Client:
         self.ssh_client.open_sftp()
 
     def close(self):
+        for server in self.forward_tunnels:
+            server.shutdown()
         self.ssh_client.close()
         self.shell_active.clear()
 

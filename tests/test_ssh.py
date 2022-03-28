@@ -60,3 +60,15 @@ def test_ssh_terminal_file_editing(ssh_client_with_shell):
     time.sleep(0.3)
     screen = ssh_client_with_shell.display_screen()
     assert "Hello world" in screen[-2]
+
+
+def test_ssh_tunnelling(ssh_client_with_src_tunnel_connected, ssh_client_via_tunnel):
+    ssh_client_via_tunnel.connect()
+    ssh_client_via_tunnel.invoke_shell()
+    ssh_client_via_tunnel.send('echo Hello World')
+    time.sleep(0.1)
+    ssh_client_via_tunnel.send('\n')
+    time.sleep(0.2)
+    screen = ssh_client_via_tunnel.display_screen()
+    assert screen[-2].startswith('Hello World')
+    ssh_client_via_tunnel.close()
