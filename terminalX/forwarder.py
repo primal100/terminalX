@@ -23,14 +23,12 @@
 
 from functools import partial
 import select
+import selectors
 import socketserver
 import threading
 
 
 import paramiko
-
-SSH_PORT = 22
-DEFAULT_PORT = 4000
 
 g_verbose = True
 
@@ -71,7 +69,7 @@ class Handler(socketserver.BaseRequestHandler):
                 (self.chain_host, self.chain_port),
                 self.request.getpeername(),
             )
-        except Exception as e:
+        except paramiko.SSHException as e:
             verbose(
                 "Incoming request to %s:%d failed: %s"
                 % (self.chain_host, self.chain_port, repr(e))
@@ -93,18 +91,29 @@ class Handler(socketserver.BaseRequestHandler):
             )
         )
 
+        selector = selectors.DefaultSelector()
+        selector.register(self.request, selectors.EVENT_READ)
+        selector.register(chan, selectors.EVENT_READ)
+
         while True:
-            r, w, x = select.select([self.request, chan], [], [])
-            if self.request in r:
-                data = self.request.recv(1024)
-                if len(data) == 0:
-                    break
-                chan.send(data)
-            if chan in r:
-                data = chan.recv(1024)
-                if len(data) == 0:
-                    break
-                self.request.send(data)
+            # r, w, x = selector.select([self.request, chan], [], [])
+            for key, mask in selector.select():
+                fileObj, fd, events, data = key
+
+                match fileObj:
+                    case self.request:
+                        data = self.request.recv(1024)
+                        if len(data) == 0:
+                            break       # break out of for loop
+                        chan.send(data)
+                    case chan:
+                        data = chan.recv(1024)
+                        if len(data) == 0:
+                            break       # break out of for loop
+                        self.request.send(data)
+            else:
+                continue    # continue while loop if no break
+            break  # break while loop if for loop broken
 
         peername = self.request.getpeername()
         chan.close()

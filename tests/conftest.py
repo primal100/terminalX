@@ -92,3 +92,33 @@ def ssh_client_via_tunnel(tunnel_port, username) -> Client:
     client = Client("127.0.0.1", port=tunnel_port, username=username, timeout=10, x11=False, term='linux')
     yield client
     client.close()
+
+
+@pytest.fixture
+def socks_port() -> int:
+    return 8889
+
+
+@pytest.fixture
+def ssh_client_with_socks_tunnel(ssh_host, ssh_port, username, socks_port) -> Client:
+    client = Client(ssh_host, port=ssh_port, username=username, timeout=5, x11=False, term='linux',
+                    socks_tunnels=[('127.0.0.1', socks_port)])
+    yield client
+    client.close()
+
+
+@pytest.fixture
+def ssh_client_with_socks_tunnel_connected(ssh_client_with_socks_tunnel) -> Client:
+    ssh_client_with_socks_tunnel.connect()
+    ssh_client_with_socks_tunnel.wait_started()
+    yield ssh_client_with_socks_tunnel
+    ssh_client_with_socks_tunnel.close()
+
+
+@pytest.fixture
+def ssh_client_via_socks(ssh_host, ssh_port, socks_port, username) -> Client:
+    client = Client(ssh_host, port=ssh_port, username=username, timeout=10, x11=False, term='linux',
+                    proxy_host='127.0.0.1', proxy_port=socks_port, proxy_version="socks5")
+    yield client
+    client.close()
+

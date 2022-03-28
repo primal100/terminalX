@@ -66,9 +66,23 @@ def test_ssh_tunnelling(ssh_client_with_src_tunnel_connected, ssh_client_via_tun
     ssh_client_via_tunnel.connect()
     ssh_client_via_tunnel.invoke_shell()
     ssh_client_via_tunnel.send('echo Hello World')
-    time.sleep(0.1)
+    time.sleep(0.2)
     ssh_client_via_tunnel.send('\n')
     time.sleep(0.2)
     screen = ssh_client_via_tunnel.display_screen()
     assert screen[-2].startswith('Hello World')
     ssh_client_via_tunnel.close()
+
+
+def test_socks_proxy(ssh_client_with_socks_tunnel_connected, ssh_client_via_socks):
+    ssh_client_via_socks.connect()
+    ssh_client_via_socks.invoke_shell()
+    ssh_client_via_socks.send('echo Hello World')
+    time.sleep(0.3)
+    ssh_client_via_socks.send('\n')
+    time.sleep(1)
+    screen = ssh_client_via_socks.display_screen()
+    assert screen[-2].startswith('Hello World')
+    time.sleep(20)
+    ssh_client_via_socks.close()
+
