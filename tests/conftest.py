@@ -134,3 +134,21 @@ def ssh_client_via_proxy_command(ssh_host, ssh_port, proxy_command, username) ->
                     proxy_command=proxy_command)
     yield client
     client.close()
+
+
+@pytest.fixture
+def jump_server() -> str:
+    return '127.0.0.1'
+
+
+@pytest.fixture
+def jump_port() -> int:
+    return 22
+
+
+@pytest.fixture
+def ssh_client_via_jump_server(ssh_host, ssh_port, username, jump_server, jump_port) -> Client:
+    client = Client(ssh_host, port=ssh_port, username=username, timeout=10, x11=False, term='linux',
+                    jump_hosts=[{'host': jump_server, 'port': jump_port, 'username': username, 'key_filename': None}])
+    yield client
+    client.close()
