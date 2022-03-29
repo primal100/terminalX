@@ -1,2 +1,4 @@
 paramiko
+psutil
+python-socks
 pyte

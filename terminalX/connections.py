@@ -1,10 +1,14 @@
 import paramiko
 import pyte
 from dataclasses import dataclass, field, replace
+from python_socks.sync import Proxy, ProxyType
 import threading
 import time
-from .types import DisabledAlgorithms, StringDict, File
-from typing import  Generator, List, Tuple
+
+from .client import SSHClient
+from .forwarder import forward_tunnel, ForwardServer
+from .types import DisabledAlgorithms, StringDict, File, KnownHostsPolicy, ProxyVersion, TunnelConfig
+from typing import Generator, List, Optional, Tuple
 
 
 class NotConnectedException(BaseException):
@@ -13,6 +17,14 @@ class NotConnectedException(BaseException):
 
 class NoShellException(BaseException):
     message = "SSH Client shell does not exist. Call the .invoke_shell() method first"
+
+
+class UnknownKnownHostsPolicy(BaseException):
+    pass
+
+
+class UnknownSocksVersion(BaseException):
+    pass
 
 
 @dataclass
@@ -30,7 +42,7 @@ class Client:
     gss_deleg_creds: bool = False,
     gss_host: str = None
     gss_trust_dns: bool = True
-    banner_timeout: float = None,
+    banner_timeout: float = None
     auth_timeout: float = None
     disabled_algorithms: DisabledAlgorithms = None
     host_keys_file: File = None
@@ -40,15 +52,22 @@ class Client:
     x11: bool = True
     x11_screen_number: int = 0
     x11_auth_protocol: str = "MIT-MAGIC-COOKIE-1"
+    known_hosts_policy: KnownHostsPolicy = "auto"
     jump_host: str = None
     jump_port: int = 22
     jump_username: str = None
-    socks_host: str = None
-    socks_port: int = None
-    socks_username: str = None
-
-    ssh_client: paramiko.SSHClient = field(init=False, repr=False, hash=False, compare=False,
-                                           default_factory=paramiko.SSHClient)
+    proxy_host: str = None
+    proxy_port: int = None
+    proxy_username: str = None
+    proxy_password: str = None
+    proxy_version: ProxyVersion = "socks5"
+    socks_rdns: Optional[bool] = None
+    socks_tunnels: List[Tuple[str, int]] = field(default_factory=list)
+    tunnels: List[TunnelConfig] = field(default_factory=list)
+    forward_tunnels: List[ForwardServer] = field(init=False, repr=False, hash=False, compare=False,
+                                                 default_factory=list)
+    ssh_client: SSHClient = field(init=False, repr=False, hash=False, compare=False,
+                                  default_factory=SSHClient)
     sftp_client: paramiko.SFTPClient = field(init=False, repr=False, hash=False, compare=False, default=None)
     ssh_shell: paramiko.Channel = field(init=False, repr=False, hash=False, compare=False, default=None)
     transport: paramiko.Transport = field(init=False, repr=False, hash=False, compare=False, default=None)
@@ -71,12 +90,31 @@ class Client:
         Raises:
         socket.error – if a socket error occurred while connecting
         """
+        self.set_known_hosts_policy()
         if self.host_keys_file:
             self.ssh_client.load_host_keys(self.host_keys_file)
         else:
             self.ssh_client.load_system_host_keys()
+
+        if self.proxy_host:
+            match self.proxy_version:
+                case "socks5":
+                    proxy_type = ProxyType.SOCKS5
+                case "socks4":
+                    proxy_type = ProxyType.SOCKS4
+                case "http":
+                    proxy_type = ProxyType.HTTP
+                case _:
+                    raise UnknownSocksVersion(
+                        f"Socks{self.proxy_version} is not recognised. Only socks4, socks5 and http are accepted")
+            proxy = Proxy.create(proxy_type, self.proxy_host, self.proxy_port, self.proxy_username, self.proxy_password,
+                                 self.socks_rdns)
+            sock = proxy.connect(self.host, self.port, timeout=self.timeout)
+        else:
+            sock = None
+
         self.ssh_client.connect(self.host, port=self.port, username=self.username, password=password,
-                                key_filename=self.key_filename, timeout=self.timeout,
+                                key_filename=self.key_filename, timeout=self.timeout, sock=sock,
                                 allow_agent=self.allow_agent, look_for_keys=self.look_for_keys, compress=self.compress,
                                 gss_auth=self.gss_auth, gss_kex=self.gss_kex, gss_deleg_creds=self.gss_deleg_creds,
                                 gss_host=self.gss_host, banner_timeout=self.banner_timeout,
@@ -85,6 +123,31 @@ class Client:
         self.transport = self.ssh_client.get_transport()
         if self.keepalive_interval:
             self.transport.set_keepalive(self.keepalive_interval)
+        for t in self.socks_tunnels:
+            self.ssh_client.open_socks_proxy(t[0], t[1])
+        for t in self.tunnels:
+            self.setup_tunnel(t)
+
+    def setup_tunnel(self, tunnel: TunnelConfig):
+        forward_server = forward_tunnel(tunnel['src'][1], tunnel['dst'][0], tunnel['dst'][1], self.transport,
+                                        tunnel['src'][0])
+        self.forward_tunnels.append(forward_server)
+
+    def wait_started(self):
+        for server in self.forward_tunnels:
+            server.wait_started(10)
+
+    def set_known_hosts_policy(self):
+        match self.known_hosts_policy:
+            case 'reject':
+                policy = paramiko.RejectPolicy
+            case 'auto':
+                policy = paramiko.AutoAddPolicy
+            case 'warn':
+                policy = paramiko.WarningPolicy
+            case _:
+                raise UnknownKnownHostsPolicy(f'{self.known_hosts_policy} not a recognised known_hosts policy')
+        self.ssh_client.set_missing_host_key_policy(policy)
 
     def invoke_shell(self, width: int = 80, height: int = 24, width_pixels: int = 0, height_pixels: int = 0,
                      history: int = 100):
@@ -179,6 +242,8 @@ class Client:
         self.ssh_client.open_sftp()
 
     def close(self):
+        for server in self.forward_tunnels:
+            server.shutdown()
         self.ssh_client.close()
         self.shell_active.clear()
 
