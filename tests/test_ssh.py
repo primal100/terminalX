@@ -108,3 +108,15 @@ def test_proxy_command(ssh_client_via_proxy_command):
     screen = find_terminal_lines(ssh_client_via_proxy_command.display_screen())
     assert screen[-2].startswith('Hello World')
     ssh_client_via_proxy_command.close()
+
+
+def test_ssh_jump_server(ssh_client_via_jump_server):
+    ssh_client_via_jump_server.connect()
+    ssh_client_via_jump_server.invoke_shell()
+    ssh_client_via_jump_server.send('echo Hello World')
+    time.sleep(0.3)
+    ssh_client_via_jump_server.send('\n')
+    time.sleep(1)
+    screen = find_terminal_lines(ssh_client_via_jump_server.display_screen())
+    assert screen[-2].startswith('Hello World')
+    ssh_client_via_jump_server.close()

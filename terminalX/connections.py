@@ -1,3 +1,5 @@
+import socket
+
 import paramiko
 import pyte
 from dataclasses import dataclass, field, replace
@@ -8,8 +10,7 @@ import time
 from .client import SSHClient
 from .forwarder import forward_tunnel, ForwardServer
 from .proxy_command import ProxyCommand
-from .types import DisabledAlgorithms, StringDict, File, KnownHostsPolicy, ProxyVersion, TunnelConfig
-from .utils import parse_string_placeholders
+from .types import DisabledAlgorithms, StringDict, File, KnownHostsPolicy, ProxyJump, ProxyJumpPasswords, ProxyVersion, TunnelConfig
 from typing import Generator, List, Optional, Tuple, Union
 
 
@@ -65,9 +66,8 @@ class Client:
     x11_screen_number: int = 0
     x11_auth_protocol: str = "MIT-MAGIC-COOKIE-1"
     known_hosts_policy: KnownHostsPolicy = "auto"
-    jump_host: str = None
-    jump_port: int = 22
-    jump_username: str = None
+    jump_hosts: list[ProxyJump] = None
+    sub_clients: list['Client'] = field(init=False, repr=False, compare=False, hash=False, default_factory=list)
     proxy_command: str = None
     proxy_host: str = None
     proxy_port: int = None
@@ -75,9 +75,9 @@ class Client:
     proxy_password: str = None
     proxy_version: ProxyVersion = "socks5"
     socks_rdns: Optional[bool] = None
-    socks_tunnels: List[Tuple[str, int]] = field(default_factory=list)
-    tunnels: List[TunnelConfig] = field(default_factory=list)
-    forward_tunnels: List[ForwardServer] = field(init=False, repr=False, hash=False, compare=False,
+    socks_tunnels: Optional[list[Tuple[str, int]]] = field(default_factory=list)
+    tunnels: Optional[list[TunnelConfig]] = field(default_factory=list)
+    forward_tunnels: list[ForwardServer] = field(init=False, repr=False, hash=False, compare=False,
                                                  default_factory=list)
     ssh_client: SSHClient = field(init=False, repr=False, hash=False, compare=False,
                                   default_factory=SSHClient)
@@ -98,7 +98,8 @@ class Client:
     def connect_with_proxy_command(self) -> ProxyCommand:
         return ProxyCommand(self.proxy_command)
 
-    def connect(self, passphrase: str = None, password: str = None) -> None:
+    def connect(self, passphrase: str = None, password: str = None, sock: socket.socket = None,
+                jump_hosts_passwords: dict[str, ProxyJumpPasswords] = None) -> None:
         """
         Raises:
         BadHostKeyException – if the server’s host key could not be verified
@@ -136,8 +137,21 @@ class Client:
             proxy = Proxy.create(proxy_type, self.proxy_host, self.proxy_port, self.proxy_username, self.proxy_password,
                                  self.socks_rdns)
             sock = proxy.connect(self.host, self.port, timeout=self.timeout)
-        else:
-            sock = None
+        elif self.jump_hosts:
+            jump_hosts = self.jump_hosts.copy()
+            jump = jump_hosts.pop(-1)
+            jump_client = replace(self, jump_hosts=jump_hosts, socks_tunnels=[], tunnels=[], **jump)
+            passwords = (jump_hosts_passwords or {}).pop(jump['host'], {})
+            password = passwords.get('password')
+            passphrase = passwords.get('passphrase')
+            jump_client.connect(password=password, passphrase=passphrase, sock=sock, jump_hosts_passwords=passwords)
+            self.sub_clients.append(jump_client)
+            jump_transport = jump_client.transport
+            sock = jump_transport.open_channel(
+                kind='direct-tcpip',
+                dest_addr=(self.host, self.port),
+                src_addr=jump_transport.getpeername(),
+            )
 
         self.ssh_client.connect(self.host, port=self.port, username=self.username, password=password,
                                 key_filename=self.key_filename, timeout=self.timeout, sock=sock,
@@ -278,8 +292,11 @@ class Client:
         for server in self.forward_tunnels:
             server.shutdown()
         self.ssh_client.close()
-        self.transport.close()
+        if self.transport:
+            self.transport.close()
         self.shell_active.clear()
+        for client in self.sub_clients:
+            client.close()
 
     def save(self):
         pass
