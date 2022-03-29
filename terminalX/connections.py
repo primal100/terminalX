@@ -22,6 +22,10 @@ class NoShellException(BaseException):
     message = "SSH Client shell does not exist. Call the .invoke_shell() method first"
 
 
+class ShellNotStartedException(BaseException):
+    pass
+
+
 class SSHConfigurationException(BaseException):
     pass
 
@@ -82,6 +86,7 @@ class Client:
     ssh_client: SSHClient = field(init=False, repr=False, hash=False, compare=False,
                                   default_factory=SSHClient)
     sftp_client: paramiko.SFTPClient = field(init=False, repr=False, hash=False, compare=False, default=None)
+    session: Union[paramiko.Channel] = field(init=False, repr=False, hash=False, compare=False, default=None)
     ssh_shell: Union[paramiko.Channel, ProxyCommand] = field(init=False, repr=False, hash=False, compare=False, default=None)
     transport: paramiko.Transport = field(init=False, repr=False, hash=False, compare=False, default=None)
     screen: pyte.Screen = field(init=False, repr=False, hash=False, compare=False, default=None)
@@ -163,6 +168,9 @@ class Client:
         self.transport = self.ssh_client.get_transport()
         if self.keepalive_interval:
             self.transport.set_keepalive(self.keepalive_interval)
+        #self.session = self.transport.open_session()
+        #if self.x11:
+        #    self.session.request_x11(screen_number=self.x11_screen_number, auth_protocol=self.x11_auth_protocol)
         for t in self.socks_tunnels:
             self.ssh_client.open_socks_proxy(t[0], t[1])
         for t in self.tunnels:
@@ -197,16 +205,19 @@ class Client:
         if not self.transport:
             raise NotConnectedException
         if not self.proxy_command:
-            self.ssh_shell = self.ssh_client.invoke_shell(term=self.term, width=width, height=height,
-                                                          width_pixels=width_pixels, height_pixels=height_pixels,
-                                                          environment=self.environment)
+            self.ssh_shell = self.transport.open_session()
+            if self.environment:
+                self.ssh_shell.update_environment(self.environment)
             if self.x11:
                 self.ssh_shell.request_x11(screen_number=self.x11_screen_number, auth_protocol=self.x11_auth_protocol)
+            self.ssh_shell.get_pty(self.term, width, height, width_pixels, height_pixels)
+            self.ssh_shell.invoke_shell()
         self.screen = pyte.HistoryScreen(80, 24, history=history)
         self.stream = pyte.Stream(self.screen)
         self.shell_active.set()
         self.receive_thread = threading.Thread(target=self.receive_always)
         self.receive_thread.start()
+        time.sleep(5)
 
     def reconnect_existing(self, sock):
         self.ssh_client.connect(self.host, sock=sock)
@@ -267,6 +278,9 @@ class Client:
         client = self.duplicate()
         client.ssh_client.open_sftp()
         return client
+
+    def exec_command(self, command) -> None:
+        self.ssh_shell.exec_command(command)
 
     def command_result(self, command: str, bufsize: int = -1, timeout: int = 3, repeat: int = 1,
                        delay: int = 5) -> Generator[str, None, None]:

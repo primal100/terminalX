@@ -120,3 +120,19 @@ def test_ssh_jump_server(ssh_client_via_jump_server):
     screen = find_terminal_lines(ssh_client_via_jump_server.display_screen())
     assert screen[-2].startswith('Hello World')
     ssh_client_via_jump_server.close()
+
+
+def test_ssh_x11(ssh_client_x11):
+    ssh_client_x11.connect()
+    ssh_client_x11.invoke_shell()
+    screen = ssh_client_x11.display_screen()
+    assert screen
+    ssh_client_x11.send('echo $DISPLAY\n')
+    time.sleep(0.3)
+    screen = ssh_client_x11.display_screen()
+    assert "echo $DISPLAY" in find_terminal_lines(screen)[-3]
+    assert find_terminal_lines(screen)[-2].startswith('localhost:')
+    ssh_client_x11.send('xterm\n')
+    from pprint import pprint
+    time.sleep(2)
+    pprint(ssh_client_x11.display_screen())
