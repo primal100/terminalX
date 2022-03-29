@@ -7,8 +7,10 @@ import time
 
 from .client import SSHClient
 from .forwarder import forward_tunnel, ForwardServer
+from .proxy_command import ProxyCommand
 from .types import DisabledAlgorithms, StringDict, File, KnownHostsPolicy, ProxyVersion, TunnelConfig
-from typing import Generator, List, Optional, Tuple
+from .utils import parse_string_placeholders
+from typing import Generator, List, Optional, Tuple, Union
 
 
 class NotConnectedException(BaseException):
@@ -19,18 +21,28 @@ class NoShellException(BaseException):
     message = "SSH Client shell does not exist. Call the .invoke_shell() method first"
 
 
-class UnknownKnownHostsPolicy(BaseException):
+class SSHConfigurationException(BaseException):
     pass
 
 
-class UnknownSocksVersion(BaseException):
+class UnknownKnownHostsPolicy(SSHConfigurationException):
     pass
+
+
+class UnknownSocksVersion(SSHConfigurationException):
+    pass
+
+
+class NotAvailableInProxyCommandMode(SSHConfigurationException):
+    def __init__(self, option: str):
+        super().__init__()
 
 
 @dataclass
 class Client:
     host: str
     port: int = 22
+    name: str = None
     username: str = None
     key_filename: File = None
     timeout: int = None
@@ -56,6 +68,7 @@ class Client:
     jump_host: str = None
     jump_port: int = 22
     jump_username: str = None
+    proxy_command: str = None
     proxy_host: str = None
     proxy_port: int = None
     proxy_username: str = None
@@ -69,12 +82,21 @@ class Client:
     ssh_client: SSHClient = field(init=False, repr=False, hash=False, compare=False,
                                   default_factory=SSHClient)
     sftp_client: paramiko.SFTPClient = field(init=False, repr=False, hash=False, compare=False, default=None)
-    ssh_shell: paramiko.Channel = field(init=False, repr=False, hash=False, compare=False, default=None)
+    ssh_shell: Union[paramiko.Channel, ProxyCommand] = field(init=False, repr=False, hash=False, compare=False, default=None)
     transport: paramiko.Transport = field(init=False, repr=False, hash=False, compare=False, default=None)
     screen: pyte.Screen = field(init=False, repr=False, hash=False, compare=False, default=None)
     stream: pyte.Stream = field(init=False, repr=False, hash=False, compare=False, default=None)
     receive_thread: threading.Thread = field(init=False, repr=False, hash=False, compare=False, default=None)
     shell_active: threading.Event = field(init=False, repr=False, hash=False, compare=False, default_factory=threading.Event)
+
+    def full_name(self) -> str:
+        name = self.name or self.host
+        if self.username:
+            name += f' ({self.username})'
+        return name
+
+    def connect_with_proxy_command(self) -> ProxyCommand:
+        return ProxyCommand(self.proxy_command)
 
     def connect(self, passphrase: str = None, password: str = None) -> None:
         """
@@ -90,6 +112,10 @@ class Client:
         Raises:
         socket.error – if a socket error occurred while connecting
         """
+        if self.proxy_command:
+            self.ssh_shell = self.connect_with_proxy_command()
+            self.transport = paramiko.Transport(self.ssh_shell)
+            return
         self.set_known_hosts_policy()
         if self.host_keys_file:
             self.ssh_client.load_host_keys(self.host_keys_file)
@@ -156,11 +182,12 @@ class Client:
         """
         if not self.transport:
             raise NotConnectedException
-        self.ssh_shell = self.ssh_client.invoke_shell(term=self.term, width=width, height=height,
-                                                      width_pixels=width_pixels, height_pixels=height_pixels,
-                                                      environment=self.environment)
-        if self.x11:
-            self.ssh_shell.request_x11(screen_number=self.x11_screen_number, auth_protocol=self.x11_auth_protocol)
+        if not self.proxy_command:
+            self.ssh_shell = self.ssh_client.invoke_shell(term=self.term, width=width, height=height,
+                                                          width_pixels=width_pixels, height_pixels=height_pixels,
+                                                          environment=self.environment)
+            if self.x11:
+                self.ssh_shell.request_x11(screen_number=self.x11_screen_number, auth_protocol=self.x11_auth_protocol)
         self.screen = pyte.HistoryScreen(80, 24, history=history)
         self.stream = pyte.Stream(self.screen)
         self.shell_active.set()
@@ -202,7 +229,7 @@ class Client:
         if data:
             self.stream.feed(data.decode())
 
-    def receive_always(self, interval: int = 0.25):
+    def receive_always(self):
         if not self.ssh_shell:
             raise NoShellException
         while self.shell_active.is_set():
@@ -221,6 +248,8 @@ class Client:
         return '\n'.join(display)
 
     def parallel_sftp(self) -> 'Client':
+        if self.proxy_command:
+            raise NotAvailableInProxyCommandMode('SFTP')
         client = self.duplicate()
         client.ssh_client.open_sftp()
         return client
@@ -230,6 +259,8 @@ class Client:
         """
         This is specifically for running a single command and returning the result. There should always be a timeout
         """
+        if self.proxy_command:
+            raise NotAvailableInProxyCommandMode('Running a command')
         for i in range(0, repeat):
             stdin, stdout, stderr = self.ssh_client.exec_command(command, bufsize=bufsize, timeout=timeout,
                                                                  environment=self.environment)
@@ -238,6 +269,8 @@ class Client:
             time.sleep(delay)
 
     def sftp(self, passphrase: str = None, password: str = None) -> None:
+        if self.proxy_command:
+            raise NotAvailableInProxyCommandMode('SFTP')
         self.connect(passphrase=passphrase, password=password)
         self.ssh_client.open_sftp()
 
@@ -245,6 +278,7 @@ class Client:
         for server in self.forward_tunnels:
             server.shutdown()
         self.ssh_client.close()
+        self.transport.close()
         self.shell_active.clear()
 
     def save(self):
