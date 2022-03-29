@@ -122,3 +122,15 @@ def ssh_client_via_socks(ssh_host, ssh_port, socks_port, username) -> Client:
     yield client
     client.close()
 
+
+@pytest.fixture
+def proxy_command(ssh_host, username, ssh_port) -> str:
+    return f"ssh -o StrictHostKeyChecking=no -l {username} {ssh_host} -p {ssh_port} nc {ssh_host} {ssh_port}"
+
+
+@pytest.fixture
+def ssh_client_via_proxy_command(ssh_host, ssh_port, proxy_command, username) -> Client:
+    client = Client(ssh_host, port=ssh_port, username=username, timeout=10, x11=False, term='linux',
+                    proxy_command=proxy_command)
+    yield client
+    client.close()

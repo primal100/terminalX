@@ -1,6 +1,12 @@
 import re
 import time
 
+import pytest
+
+
+def test_ssh_connection_full_name(ssh_client, ssh_host, username):
+    assert ssh_client.full_name() == f'{ssh_host} ({username})'
+
 
 def test_ssh_connection(ssh_client):
     ssh_client.connect()
@@ -90,3 +96,15 @@ def test_socks_proxy(ssh_client_with_socks_tunnel_connected, ssh_client_via_sock
     assert screen[-2].startswith('Hello World')
     ssh_client_via_socks.close()
 
+
+@pytest.mark.skip("Not working")
+def test_proxy_command(ssh_client_via_proxy_command):
+    ssh_client_via_proxy_command.connect()
+    ssh_client_via_proxy_command.invoke_shell()
+    ssh_client_via_proxy_command.send('echo Hello World')
+    time.sleep(0.3)
+    ssh_client_via_proxy_command.send('\n')
+    time.sleep(1)
+    screen = find_terminal_lines(ssh_client_via_proxy_command.display_screen())
+    assert screen[-2].startswith('Hello World')
+    ssh_client_via_proxy_command.close()
