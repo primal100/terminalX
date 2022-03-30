@@ -11,7 +11,7 @@ from .client import SSHClient
 from .forwarder import forward_tunnel, ForwardServer
 from .proxy_command import ProxyCommand
 from .types import DisabledAlgorithms, StringDict, File, KnownHostsPolicy, ProxyJump, ProxyJumpPasswords, ProxyVersion, TunnelConfig
-from typing import Generator, List, Optional, Tuple, Union
+from typing import Callable, Generator, List, Optional, Tuple, Union
 
 
 class NotConnectedException(BaseException):
@@ -104,7 +104,7 @@ class Client:
         return ProxyCommand(self.proxy_command)
 
     def connect(self, passphrase: str = None, password: str = None, sock: socket.socket = None,
-                jump_hosts_passwords: dict[str, ProxyJumpPasswords] = None) -> None:
+                jump_hosts_passwords: dict[str, ProxyJumpPasswords] = None, ask_password_callback: Callable = None) -> None:
         """
         Raises:
         BadHostKeyException – if the server’s host key could not be verified
@@ -157,18 +157,31 @@ class Client:
                 dest_addr=(self.host, self.port),
                 src_addr=jump_transport.getpeername(),
             )
-
-        self.ssh_client.connect(self.host, port=self.port, username=self.username, password=password,
-                                key_filename=self.key_filename, timeout=self.timeout, sock=sock,
-                                allow_agent=self.allow_agent, look_for_keys=self.look_for_keys, compress=self.compress,
-                                gss_auth=self.gss_auth, gss_kex=self.gss_kex, gss_deleg_creds=self.gss_deleg_creds,
-                                gss_host=self.gss_host, banner_timeout=self.banner_timeout,
-                                auth_timeout=self.auth_timeout, gss_trust_dns=self.gss_trust_dns, passphrase=passphrase,
-                                disabled_algorithms=self.disabled_algorithms)
-        self.transport = self.ssh_client.get_transport()
+        try:
+            self.ssh_client.connect(self.host, port=self.port, username=self.username, password=password,
+                                    key_filename=self.key_filename, timeout=self.timeout, sock=sock,
+                                    allow_agent=self.allow_agent, look_for_keys=self.look_for_keys, compress=self.compress,
+                                    gss_auth=self.gss_auth, gss_kex=self.gss_kex, gss_deleg_creds=self.gss_deleg_creds,
+                                    gss_host=self.gss_host, banner_timeout=self.banner_timeout,
+                                    auth_timeout=self.auth_timeout, gss_trust_dns=self.gss_trust_dns, passphrase=passphrase,
+                                    disabled_algorithms=self.disabled_algorithms)
+        except paramiko.SSHException as e:   # Suggest PR for paramiko to raise AuthenticationException instead
+            self.transport = self.ssh_client.get_transport()         # As paramiko raises SSHException in case authentication fails, need to check if it's because Authentication failed or something else
+            if not self.transport or not self.transport.is_active():
+                raise           # Connection error not related to authentication
+            try:
+                self.transport.auth_interactive_dumb(self.username)
+            except paramiko.BadAuthenticationType as e:
+                if "password" in e and not password and ask_password_callback:
+                    password = ask_password_callback(self)
+                    self.transport.auth_password(self.username, password)
+                else:
+                    raise paramiko.AuthenticationException("Unable to authenticate to this server with provide authentication methods and interactive login not enabled on server side. ")
+        else:
+            self.transport = self.ssh_client.get_transport()
         if self.keepalive_interval:
             self.transport.set_keepalive(self.keepalive_interval)
-        #self.session = self.transport.open_session()
+        self.session = self.transport.open_session()
         #if self.x11:
         #    self.session.request_x11(screen_number=self.x11_screen_number, auth_protocol=self.x11_auth_protocol)
         for t in self.socks_tunnels:
@@ -217,7 +230,6 @@ class Client:
         self.shell_active.set()
         self.receive_thread = threading.Thread(target=self.receive_always)
         self.receive_thread.start()
-        time.sleep(5)
 
     def reconnect_existing(self, sock):
         self.ssh_client.connect(self.host, sock=sock)

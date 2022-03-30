@@ -10,7 +10,7 @@ def test_ssh_connection_full_name(ssh_client, ssh_host, username):
 
 def test_ssh_connection(ssh_client):
     ssh_client.connect()
-    assert ssh_client.transport
+    assert ssh_client.transport and ssh_client.transport.is_active() and ssh_client.transport.is_authenticated()
 
 
 def find_terminal_lines(display: list[str]) -> list[str]:

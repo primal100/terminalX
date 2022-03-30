@@ -3,17 +3,17 @@ import getpass
 from terminalX.connections import Client
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def ssh_host() -> str:
     return '127.0.0.1'
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def ssh_port() -> int:
     return 22
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def username() -> str:
     return getpass.getuser()
 
@@ -60,9 +60,9 @@ def ssh_client_x11_with_shell(ssh_client_x11_connected) -> Client:
     ssh_client_x11_connected.close()
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def next_hop() -> str:
-    return '172.31.57.119'
+    return '172.31.62.223'
 
 
 @pytest.fixture
