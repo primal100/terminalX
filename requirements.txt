@@ -1,5 +1,5 @@
 paramiko
 psutil
 python-socks
-python-xlib
 pyte
+windows-curses
