@@ -11,7 +11,8 @@ from .client import SSHClient
 from .forwarder import forward_tunnel, ForwardServer
 from .proxy_command import ProxyCommand
 from .types import DisabledAlgorithms, StringDict, File, KnownHostsPolicy, ProxyJump, ProxyJumpPasswords, ProxyVersion, TunnelConfig
-from typing import Callable, Generator, List, Optional, Tuple, Union
+from .x11 import register_x11
+from typing import Callable, Generator, Optional
 
 
 class NotConnectedException(BaseException):
@@ -79,15 +80,15 @@ class Client:
     proxy_password: str = None
     proxy_version: ProxyVersion = "socks5"
     socks_rdns: Optional[bool] = None
-    socks_tunnels: Optional[list[Tuple[str, int]]] = field(default_factory=list)
+    socks_tunnels: Optional[list[tuple[str, int]]] = field(default_factory=list)
     tunnels: Optional[list[TunnelConfig]] = field(default_factory=list)
     forward_tunnels: list[ForwardServer] = field(init=False, repr=False, hash=False, compare=False,
                                                  default_factory=list)
     ssh_client: SSHClient = field(init=False, repr=False, hash=False, compare=False,
                                   default_factory=SSHClient)
     sftp_client: paramiko.SFTPClient = field(init=False, repr=False, hash=False, compare=False, default=None)
-    session: Union[paramiko.Channel] = field(init=False, repr=False, hash=False, compare=False, default=None)
-    ssh_shell: Union[paramiko.Channel, ProxyCommand] = field(init=False, repr=False, hash=False, compare=False, default=None)
+    session: paramiko.Channel = field(init=False, repr=False, hash=False, compare=False, default=None)
+    ssh_shell: paramiko.Channel | ProxyCommand = field(init=False, repr=False, hash=False, compare=False, default=None)
     transport: paramiko.Transport = field(init=False, repr=False, hash=False, compare=False, default=None)
     screen: pyte.Screen = field(init=False, repr=False, hash=False, compare=False, default=None)
     stream: pyte.Stream = field(init=False, repr=False, hash=False, compare=False, default=None)
@@ -104,7 +105,9 @@ class Client:
         return ProxyCommand(self.proxy_command)
 
     def connect(self, passphrase: str = None, password: str = None, sock: socket.socket = None,
-                jump_hosts_passwords: dict[str, ProxyJumpPasswords] = None, ask_password_callback: Callable = None) -> None:
+                jump_hosts_passwords: dict[str, ProxyJumpPasswords] = None,
+                interactive_login_handler: Callable[[str, str, list[str]], list[str]] = None,
+                ask_password_callback: Callable[[str], str] = None) -> None:
         """
         Raises:
         BadHostKeyException – if the server’s host key could not be verified
@@ -170,10 +173,13 @@ class Client:
             if not self.transport or not self.transport.is_active():
                 raise           # Connection error not related to authentication
             try:
-                self.transport.auth_interactive_dumb(self.username)
+                if interactive_login_handler:
+                    self.transport.auth_interactive(self.username, interactive_login_handler)
+                else:
+                    self.transport.auth_interactive_dumb(self.username)
             except paramiko.BadAuthenticationType as e:
                 if "password" in e and not password and ask_password_callback:
-                    password = ask_password_callback(self)
+                    password = ask_password_callback(self.username)
                     self.transport.auth_password(self.username, password)
                 else:
                     raise paramiko.AuthenticationException("Unable to authenticate to this server with provide authentication methods and interactive login not enabled on server side. ")
@@ -222,7 +228,7 @@ class Client:
             if self.environment:
                 self.ssh_shell.update_environment(self.environment)
             if self.x11:
-                self.ssh_shell.request_x11(screen_number=self.x11_screen_number, auth_protocol=self.x11_auth_protocol)
+                register_x11(self.ssh_shell, screen_number=self.x11_screen_number, auth_protocol=self.x11_auth_protocol)
             self.ssh_shell.get_pty(self.term, width, height, width_pixels, height_pixels)
             self.ssh_shell.invoke_shell()
         self.screen = pyte.HistoryScreen(80, 24, history=history)
@@ -272,12 +278,12 @@ class Client:
         while self.shell_active.is_set():
             self.receive()
 
-    def display_screen(self) -> List[str]:
+    def display_screen(self) -> list[str]:
         if self.screen:
             return self.screen.display
         return []
 
-    def cursors(self) -> Tuple[int, int]:
+    def cursors(self) -> tuple[int, int]:
         return self.screen.cursor.x, self.screen.cursor.y
 
     def display_screen_as_text(self) -> str:

@@ -5,7 +5,7 @@ from terminalX.connections import Client
 
 @pytest.fixture(scope="session")
 def ssh_host() -> str:
-    return '127.0.0.1'
+    return '172.17.5.242'
 
 
 @pytest.fixture(scope="session")

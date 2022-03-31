@@ -133,6 +133,5 @@ def test_ssh_x11(ssh_client_x11):
     assert "echo $DISPLAY" in find_terminal_lines(screen)[-3]
     assert find_terminal_lines(screen)[-2].startswith('localhost:')
     ssh_client_x11.send('xterm\n')
-    from pprint import pprint
-    time.sleep(2)
-    pprint(ssh_client_x11.display_screen())
+    print('xterm window should appear now')
+    time.sleep(5)
