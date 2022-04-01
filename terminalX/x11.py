@@ -3,6 +3,7 @@
 
 import os
 import threading
+from .executors import executor
 from functools import partial
 import socket
 import selectors
@@ -10,24 +11,27 @@ import logging
 import paramiko
 import subprocess
 
-LOGGER = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 x11_server = ('127.0.0.1', 6000)
 
 
 class X11ServerConnectionFailure(BaseException):
-    message = "Unable to connect to local X11 Server. Please ensure an X11 server such as VcXsrv or xming is running"
+    message = "Unable to connect to local X11 Server. Please ensure an X11 server such as VcXsrv or xming is running. "
+
+    def __init__(self, error: str):
+        self.message += error
 
 
-potential_x11_servers: dict[str, list[str]]
+potential_x11_servers: dict[str, tuple[list[str], list[str]]]
 
 if os.name == "nt":
     potential_x11_servers = {
-        'VcXsrv': [
+        'xming': ([
+            "C:\\Program Files (x86)\\Xming\\Xming.exe"], [":0", "-clipboard", "-multiwindow"]),
+        'VcXsrv': ([
             "C:\\Program Files\\VcXsrv\\vcxsrv.exe"
-        ],
-        'xming': [
-            "C:\\Program Files (x86)\\Xming\\Xming.exe"],
+        ], []),
     }
 else:
     potential_x11_servers = {}
@@ -43,19 +47,22 @@ def terminate_x11_servers():
 
 def start_x11_server() -> bool:
     path = None
+    args = []
     for k, v in potential_x11_servers.items():
+        path, args = v
         where = 'where' if os.name == 'nt' else 'which'
         if subprocess.run([where, k]).returncode == 0:
             path = k            # X Server Application is in Windows Path
             break
         else:
             try:
-                path = next(filter(os.path.exists, v))
+                path = next(filter(os.path.exists, path))
                 break
             except StopIteration:
                 continue
     if path:
-        x11_server_processes.append(subprocess.Popen(path))
+        args = [path] + args
+        x11_server_processes.append(subprocess.Popen(args))
         return True
     return False
 
@@ -65,16 +72,17 @@ def connect_to_x11_server(x11_try_start_server: bool = False) -> socket.socket:
     for i in range(0, 2):
         try:
             local_x11_socket.connect(x11_server)
-        except socket.error:
+            break
+        except socket.error as e:
             if i == 0 and x11_try_start_server:
                 if not start_x11_server():
-                    raise X11ServerConnectionFailure
+                    raise X11ServerConnectionFailure(str(e))
             else:
                 raise X11ServerConnectionFailure
     return local_x11_socket
 
 
-def x11_handler(channels: dict[int, tuple], selector: selectors.BaseSelector, x11_try_start_server: bool,
+def _x11_handler(channels: dict[int, tuple], selector: selectors.BaseSelector, x11_try_start_server: bool,
                 channel: paramiko.Channel, address: tuple[str, int]):
     '''handler for incoming x11 connections
     for each x11 incoming connection,
@@ -91,6 +99,14 @@ def x11_handler(channels: dict[int, tuple], selector: selectors.BaseSelector, x1
     selector.register(local_x11_socket, selectors.EVENT_READ)
     transport = channel.get_transport()
     transport._queue_incoming_channel(channel)
+
+
+def x11_handler(channels: dict[int, tuple], selector: selectors.BaseSelector, x11_try_start_server: bool,
+                channel: paramiko.Channel, address: tuple[str, int]):
+    """
+    Run in thread so as not to block terminal while connectiing to x11 server
+    """
+    executor.submit(_x11_handler, channels, selector, x11_try_start_server, channel, address)
 
 
 def process_x11(session, channels: dict[int, tuple], selector: selectors.BaseSelector):

@@ -1,11 +1,11 @@
 import logging
 import os
-import threading
-import time
-
 from terminalX.connections import Client
+from terminalX.types import CharSeq
 import curses
+from curses import ascii
 from pathlib import Path
+from terminalX.utils import static
 
 
 file_path = Path(os.path.realpath(__file__)).parent
@@ -77,71 +77,118 @@ special_keys = {
 }
 
 
+color_translation = {
+    'default': -1,
+    'black': curses.COLOR_BLACK,
+    'blue': curses.COLOR_BLUE,
+    'cyan': curses.COLOR_CYAN,
+    'green': curses.COLOR_GREEN,
+    'magenta': curses.COLOR_MAGENTA,
+    'red': curses.COLOR_RED,
+    'white': curses.COLOR_WHITE,
+    'yellow': curses.COLOR_YELLOW,
+}
+
+
+color_pairs = {
+    'black': {
+         'white': 0
+    }
+}
+
+
+@static(last_color_pair_no=0)
+def get_color_pair(bg: str, fg: str) -> int:
+    if all(color == 'default' for color in (bg, fg)):
+        return 0
+    if not (color_pair_no := color_pairs.get(bg, {}).get(fg, None)):
+        color_pair_no = get_color_pair.last_color_pair_no + 1
+
+        colors = color_translation.get(bg), color_translation.get(fg)   # Color couple has not been initialized
+        if not colors[0] or not colors[1]:
+            # If one color is not available, better to use default for both to avoid a color conflict
+            return 0
+
+        curses.init_pair(color_pair_no, *colors)
+        get_color_pair.last_color_pair_no = color_pair_no
+        color_pairs[bg] = color_pairs.get(bg, {})
+        color_pairs[bg][fg] = color_pair_no
+    return curses.color_pair(color_pair_no)
+
+
 class Terminal:
-    def __init__(self, client: Client, stdscr: curses.window):
+    def __init__(self, client: Client, stdscr: curses.window, fixed_colors: tuple[str, str] = None):
         self.client = client
         self.stdscr = stdscr
-        begin_x = 20
-        begin_y = 7
-        print('MAX SIZE:')
-        print(self.stdscr.getmaxyx())
+        curses.use_default_colors()
+        self.color_pair = get_color_pair(*fixed_colors) if fixed_colors else None
         height, width = self.stdscr.getmaxyx()
         self.stdscr.keypad(True)
-        # self.stdscr.timeout(250)
+        self.stdscr.timeout(50)
         self.stdscr.scrollok(True)
-        self.stdscr.idcok(True)
+        self.stdscr.idcok(False)
         client.invoke_shell(height=height, recv_callback=self.on_recv)
         self.send_input()
 
     def send_input(self):
-        logger.debug('send chars')
         while self.client.shell_active:
-            logger.debug('getch')
             char = self.stdscr.getch()
             if self.client.shell_active and not char == -1:
-                print('Following char received')
-                print(char)
-                logger.debug('Following char was input and being sent %s', char)
                 value = special_keys.get(char) or chr(char)
-                print('sending', char)
                 self.client.send(value)
         self.close()
 
+    def addstr(self, lineno, char_seq: CharSeq):
+        self.stdscr.addstr(
+            lineno, char_seq['column'], char_seq['text'], char_seq['attrs'])
+
     def on_recv(self, data: bytes):
-        logger.debug('Received data')
-        logger.debug(data)
-        text = self.client.display_screen_as_text()
-        logger.debug(text)
-        print(text)
-        logger.debug('Adding String')
-        self.stdscr.addstr(0, 0, text)
-        logger.debug('String added')
-        cursors = self.client.cursors()
-        print(cursors)
-        cursors = (cursors[0], cursors[1])
-        logger.debug('Cursors current position %s', curses.getsyx())
-        logger.debug('Cursors window current position %s', self.stdscr.getyx())
-        logger.debug('Setting cursors to %s', cursors)
-        self.stdscr.move(*cursors)
-        logger.debug('Cursors set to %s', cursors)
-        logger.debug('Cursors current position %s', curses.getsyx())
-        logger.debug('Cursors window current position %s', self.stdscr.getyx())
-        self.stdscr.refresh()
-        logger.debug('screen refreshed')
+        if self.client.shell_active:
+            cursors = self.client.cursors()
+            cursors = (cursors[0], cursors[1])
+            self.stdscr.move(*cursors)
+            changes = self.client.display_screen_line_changes()
+            for lineno, chars in changes.items():
+                current_char_seq: CharSeq = {'column': 0, 'text': '', 'attrs': 0}  # Create first sequence for line
+                for column, char in chars.items():
+                    text = char.data
+                    attrs = self.color_pair if self.color_pair else get_color_pair(char.fg, char.bg)
+                    if char.bold:
+                        attrs += curses.A_BOLD
+                    if char.italics:
+                        attrs += curses.A_ITALIC
+                    if char.underscore:
+                        attrs += curses.A_UNDERLINE
+                    if char.strikethrough:
+                        text = text + "\u0336"   # Strikethrough not directly supported in curses
+                    if char.reverse:
+                        attrs += curses.A_REVERSE
+                    if getattr(char, "blink", False):       # Blink added to pyte but not in latest official release yet
+                        attrs += curses.A_BLINK
+                    if not text:
+                        current_char_seq['text'] = text     # Initial char sequence
+                        current_char_seq['attrs'] = attrs
+                    elif attrs == current_char_seq['attrs']:
+                        current_char_seq['text'] += text   # Append to existing string with same attrs
+                    else:
+                        # Attrs have changed. Write old character sequence and create new
+                        self.addstr(lineno, current_char_seq)
+                        current_char_seq = {'text': char.data, 'attrs': attrs, 'column': column}
+
+                if current_char_seq['text']:
+                    self.addstr(lineno, current_char_seq)  # Write final sequence for this line
+            self.stdscr.refresh()
 
     def close(self):
-        logger.debug('closing')
         self.stdscr.scrollok(False)
         self.client.close()
-        logger.debug('waiting client closed')
         self.client.wait_closed()
-        logger.debug('client closed')
 
 
 def main(stdscr: curses.window):
     host = '127.0.0.1'
     port = 22
-    client = Client(host, port=port, x11=False, term='xterm')
+    client = Client(host, port=port, x11=True, term='xterm-256color')
     client.connect()
     Terminal(client, stdscr)
 

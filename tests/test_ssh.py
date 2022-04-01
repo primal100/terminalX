@@ -21,17 +21,23 @@ def test_ssh_terminal(ssh_client_connected):
     ssh_client_connected.invoke_shell()
     screen = ssh_client_connected.display_screen()
     assert screen
-    ssh_client_connected.send('sleep 5\n')
-    time.sleep(2)
-    screen = ssh_client_connected.display_screen()
+    line_changes = ssh_client_connected.display_screen_line_changes()
+    assert len(line_changes) == len(screen)
     ssh_client_connected.send('echo Hello World')
-    time.sleep(0.3)
+    time.sleep(180)
     screen = ssh_client_connected.display_screen()
-    assert "echo Hello World" in find_terminal_lines(screen)[-1]
+    terminal_lines = find_terminal_lines(screen)
+    assert "echo Hello World" in terminal_lines[-1]
+    line_changes = ssh_client_connected.display_screen_line_changes()
+    current_line = ssh_client_connected.cursors()[0]
+    assert len(line_changes) == 1
+    assert "echo Hello World" in line_changes[current_line]
     ssh_client_connected.send('\n')
     time.sleep(0.3)
     screen = ssh_client_connected.display_screen()
     assert find_terminal_lines(screen)[-2].startswith('Hello World')
+    line_changes = ssh_client_connected.display_screen_line_changes()
+    assert len(line_changes) == 2
 
 
 def test_ssh_terminal_file_editing(ssh_client_with_shell):
@@ -137,4 +143,4 @@ def test_ssh_x11(ssh_client_x11):
     assert find_terminal_lines(screen)[-2].startswith('localhost:')
     ssh_client_x11.send('xterm\n')
     print('xterm window should appear now')
-    time.sleep(5)
+    time.sleep(20)

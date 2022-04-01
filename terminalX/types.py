@@ -26,3 +26,9 @@ class ProxyJump(TypedDict, total=False):
 class ProxyJumpPasswords(TypedDict, total=False):
     password: Optional[str]                 # NotRequired
     passphrase: Optional[str]               # NotRequired
+
+
+class CharSeq(TypedDict):
+    column: int
+    text: str
+    attrs: int

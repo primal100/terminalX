@@ -286,12 +286,14 @@ class Client:
     def receive(self, callback: [[], None] = None):
         data = self.ssh_shell.recv(9999)
         logging.debug('Received data %s bytes', len(data))
+        logging.debug('Received data %s', data)
         if data:
-            self.stream.feed(data.decode())
-            if callback:
-                callback(data)
+            self.stream.feed(data.decode('utf-8', errors='ignore'))
         else:
+            logger.debug('Clearing shell event')
             self.shell_active_event.clear()
+        if callback:
+            callback(data)
 
     def receive_always(self, callback: Callable[[], None] = None):
         if not self.ssh_shell:
@@ -306,6 +308,11 @@ class Client:
 
     def cursors(self) -> tuple[int, int]:
         return self.screen.cursor.y, self.screen.cursor.x,
+
+    def display_screen_line_changes(self) -> dict[int, dict[int, pyte.screens.Char]]:
+        changes = {line: self.screen.buffer[line] for line in self.screen.dirty}
+        self.screen.dirty.clear()
+        return changes
 
     def display_screen_as_text(self) -> str:
         display = self.display_screen()
