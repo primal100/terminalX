@@ -1,3 +1,4 @@
+import os
 import socket
 
 import paramiko
@@ -53,7 +54,7 @@ class Client:
     host: str
     port: int = 22
     name: str = None
-    username: str = None
+    username: str = field(default_factory=os.getlogin)
     key_filename: File = None
     timeout: int = None
     allow_agent: bool = False           # True when https://github.com/paramiko/paramiko/pull/2010 is merged
@@ -184,11 +185,12 @@ class Client:
                 else:
                     self.transport.auth_interactive_dumb(self.username)
             except paramiko.BadAuthenticationType as e:
-                if "password" in e and not password and ask_password_callback:
+                if "password" in str(e) and not password and ask_password_callback:
                     password = ask_password_callback(self.username)
                     self.transport.auth_password(self.username, password)
                 else:
-                    raise paramiko.AuthenticationException("Unable to authenticate to this server with provide authentication methods and interactive login not enabled on server side. ")
+                    raise paramiko.AuthenticationException(
+                        "Unable to authenticate to this server with provided authentication methods and interactive login not enabled on server side. ")
         else:
             self.transport = self.ssh_client.get_transport()
         if self.keepalive_interval:
