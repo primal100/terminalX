@@ -21,6 +21,9 @@ def test_ssh_terminal(ssh_client_connected):
     ssh_client_connected.invoke_shell()
     screen = ssh_client_connected.display_screen()
     assert screen
+    ssh_client_connected.send('sleep 5\n')
+    time.sleep(2)
+    screen = ssh_client_connected.display_screen()
     ssh_client_connected.send('echo Hello World')
     time.sleep(0.3)
     screen = ssh_client_connected.display_screen()

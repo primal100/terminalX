@@ -9,7 +9,6 @@ import selectors
 import logging
 import paramiko
 import subprocess
-from typing import Optional
 
 LOGGER = logging.getLogger(__name__)
 
@@ -88,8 +87,8 @@ def x11_handler(channels: dict[int, tuple], selector: selectors.BaseSelector, x1
     local_x11_socket_fileno = local_x11_socket.fileno()
     channels[x11_chanfd] = channel, local_x11_socket
     channels[local_x11_socket_fileno] = local_x11_socket, channel
-    selector.register(x11_chanfd, selectors.EVENT_READ)
-    selector.register(local_x11_socket_fileno, selectors.EVENT_READ)
+    selector.register(channel, selectors.EVENT_READ)
+    selector.register(local_x11_socket, selectors.EVENT_READ)
     transport = channel.get_transport()
     transport._queue_incoming_channel(channel)
 
@@ -97,33 +96,37 @@ def x11_handler(channels: dict[int, tuple], selector: selectors.BaseSelector, x1
 def process_x11(session, channels: dict[int, tuple], selector: selectors.BaseSelector):
     # accept first remote x11 connection
     transport = session.get_transport()
-    transport.accept()
 
-    # event loop
     while not session.exit_status_ready():
-        for key, mask in selector.select():
-            fileObj, fd, events, data = key
-            # accept subsequent x11 connections if any
-            if len(transport.server_accepts) > 0:
-                transport.accept()
-            # data either on local/remote x11 socket
-            if fd in channels.keys():
-                channel, counterpart = channels[fd]
-                try:
-                    # forward data between local/remote x11 socket.
-                    data = channel.recv(4096)
-                    counterpart.sendall(data)
-                except socket.error:
-                    channel.close()
-                    counterpart.close()
-                    del channels[fd]
+        if not bool(selector.get_map()):    # Select will fail in Windows if no sockets are registered
+            transport.accept(timeout=0.25)
+        else:
+            for key, mask in selector.select(timeout=0.5):
+                fileObj, fd, events, data = key
+                # accept subsequent x11 connections if any
+                if len(transport.server_accepts) > 0:
+                    transport.accept()
+                # data either on local/remote x11 socket
+                if fd in channels.keys():
+                    channel, counterpart = channels[fd]
+                    try:
+                        # forward data between local/remote x11 socket.
+                        data = channel.recv(4096)
+                        counterpart.sendall(data)
+                    except socket.error:
+                        channel.close()
+                        counterpart.close()
+                        del channels[fd]
+                        selector.unregister(channel)
+                        selector.unregister(counterpart)
 
 
 def register_x11(session: paramiko.Channel, screen_number: int = None, auth_protocol: str = None,
-                 x11_try_start_server: bool = False):
+                 x11_try_start_server: bool = False) -> threading.Thread:
     selector = selectors.DefaultSelector()
     channels = {}
     handler = partial(x11_handler, channels, selector, x11_try_start_server)
     session.request_x11(handler=handler, screen_number=screen_number, auth_protocol=auth_protocol)
     thread = threading.Thread(target=process_x11, args=(session, channels, selector))
     thread.start()
+    return thread

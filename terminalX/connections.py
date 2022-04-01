@@ -4,6 +4,7 @@ import paramiko
 import pyte
 from dataclasses import dataclass, field, replace
 from python_socks.sync import Proxy, ProxyType
+import logging
 import threading
 import time
 
@@ -13,6 +14,9 @@ from .proxy_command import ProxyCommand
 from .types import DisabledAlgorithms, StringDict, File, KnownHostsPolicy, ProxyJump, ProxyJumpPasswords, ProxyVersion, TunnelConfig
 from .x11 import register_x11
 from typing import Callable, Generator, Optional
+
+
+logger = logging.getLogger()
 
 
 class NotConnectedException(BaseException):
@@ -71,6 +75,7 @@ class Client:
     x11_screen_number: int = 0
     x11_auth_protocol: str = "MIT-MAGIC-COOKIE-1"
     x11_try_start_server: bool = True
+    threads: list[threading.Thread] = field(init=False, repr=False, hash=False, compare=False, default_factory=list)
     known_hosts_policy: KnownHostsPolicy = "auto"
     jump_hosts: list[ProxyJump] = None
     sub_clients: list['Client'] = field(init=False, repr=False, compare=False, hash=False, default_factory=list)
@@ -94,7 +99,7 @@ class Client:
     screen: pyte.Screen = field(init=False, repr=False, hash=False, compare=False, default=None)
     stream: pyte.Stream = field(init=False, repr=False, hash=False, compare=False, default=None)
     receive_thread: threading.Thread = field(init=False, repr=False, hash=False, compare=False, default=None)
-    shell_active: threading.Event = field(init=False, repr=False, hash=False, compare=False, default_factory=threading.Event)
+    shell_active_event: threading.Event = field(init=False, repr=False, hash=False, compare=False, default_factory=threading.Event)
 
     def full_name(self) -> str:
         name = self.name or self.host
@@ -227,14 +232,18 @@ class Client:
             if self.environment:
                 self.ssh_shell.update_environment(self.environment)
             if self.x11:
-                register_x11(self.ssh_shell, screen_number=self.x11_screen_number,
-                             auth_protocol=self.x11_auth_protocol, x11_try_start_server=self.x11_try_start_server)
+                x11_thread = register_x11(self.ssh_shell, screen_number=self.x11_screen_number,
+                                          auth_protocol=self.x11_auth_protocol,
+                                          x11_try_start_server=self.x11_try_start_server)
+                self.threads.append(x11_thread)
             self.ssh_shell.get_pty(self.term, width, height, width_pixels, height_pixels)
             self.ssh_shell.invoke_shell()
-        self.screen = pyte.HistoryScreen(80, 24, history=history)
+        self.screen = pyte.HistoryScreen(width, height, history=history)
         self.stream = pyte.Stream(self.screen)
-        self.shell_active.set()
-        self.receive_thread = threading.Thread(target=self.receive_always, kwargs={'callback': recv_callback})
+        self.shell_active_event.set()
+        self.receive_thread = threading.Thread(target=self.receive_always,
+                                               kwargs={'callback': recv_callback},
+                                               daemon=True)
         self.receive_thread.start()
 
     def reconnect_existing(self, sock):
@@ -262,22 +271,32 @@ class Client:
         client.reconnect_existing(sock)
         return client
 
+    @property
+    def shell_active(self) -> bool:
+        return self.shell_active_event.is_set()
+
     def send(self, text: str):
         if not self.ssh_shell:
             raise NoShellException
-        self.ssh_shell.sendall(text.encode('utf-8'))
+        try:
+            self.ssh_shell.sendall(text.encode('utf-8'))
+        except OSError:
+            self.shell_active_event.clear()
 
     def receive(self, callback: [[], None] = None):
         data = self.ssh_shell.recv(9999)
+        logging.debug('Received data %s bytes', len(data))
         if data:
             self.stream.feed(data.decode())
             if callback:
                 callback(data)
+        else:
+            self.shell_active_event.clear()
 
-    def receive_always(self, callback: [[], None] = None):
+    def receive_always(self, callback: Callable[[], None] = None):
         if not self.ssh_shell:
             raise NoShellException
-        while self.shell_active.is_set():
+        while self.shell_active_event.is_set():
             self.receive(callback=callback)
 
     def display_screen(self) -> list[str]:
@@ -286,7 +305,7 @@ class Client:
         return []
 
     def cursors(self) -> tuple[int, int]:
-        return self.screen.cursor.x, self.screen.cursor.y
+        return self.screen.cursor.y, self.screen.cursor.x,
 
     def display_screen_as_text(self) -> str:
         display = self.display_screen()
@@ -323,14 +342,22 @@ class Client:
         self.ssh_client.open_sftp()
 
     def close(self):
+        self.shell_active_event.clear()
         for server in self.forward_tunnels:
             server.shutdown()
         self.ssh_client.close()
         if self.transport:
             self.transport.close()
-        self.shell_active.clear()
         for client in self.sub_clients:
             client.close()
+
+    def wait_closed(self):
+        logger.debug('joining receive thread')
+        self.receive_thread.join()
+        logger.debug('joining x11 thread')
+        for thread in self.threads:
+            thread.join()
+        logger.debug('x11 thread joined')
 
     def save(self):
         pass
