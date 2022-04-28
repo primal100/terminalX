@@ -1,9 +1,9 @@
 import logging
 import os
+import sys
 from terminalX.connections import Client
 from terminalX.types import CharSeq
 import curses
-from curses import ascii
 from pathlib import Path
 from terminalX.utils import static
 
@@ -14,14 +14,24 @@ log_file = file_path / "log.txt"
 
 logger = logging.getLogger()
 handler = logging.FileHandler(log_file, mode='w')
-# handler.setFormatter(logging.Formatter('%(asctime)s %(level)s %(module)s %(message)s'))
+handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
 logger.addHandler(handler)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
+logger.info('Version %s', 1.0)
+
+
+def exc_handler(type, value, tb):
+    logger.exception("Uncaught exception: {0}".format(str(value)))
+
+
+# Install exception handler
+sys.excepthook = exc_handler
 
 
 esc = chr(0x1b)
 
 # https://www.gnu.org/software/screen/manual/html_node/Input-Translation.html
+# https://unix.stackexchange.com/questions/659649/how-to-find-the-escape-sequence-for-shift-pageup-shift-pagedown
 special_keys = {
     curses.KEY_UP: esc + "OA",
     curses.KEY_DOWN: esc + "OB",
@@ -116,79 +126,141 @@ def get_color_pair(bg: str, fg: str) -> int:
     return curses.color_pair(color_pair_no)
 
 
+indexes = {'i': 0}
+scrolls = [0, 2, 3, 4, 6, 0]
+
+
 class Terminal:
     def __init__(self, client: Client, stdscr: curses.window, fixed_colors: tuple[str, str] = None):
         self.client = client
         self.stdscr = stdscr
+        self.height, self.width = self.stdscr.getmaxyx()
+        logger.info('Height: %s Width: %s', self.height, self.width)
+        self.pad = curses.newpad(self.height * 10, self.width)
         curses.use_default_colors()
         self.color_pair = get_color_pair(*fixed_colors) if fixed_colors else None
-        height, width = self.stdscr.getmaxyx()
-        self.stdscr.keypad(True)
-        self.stdscr.timeout(50)
-        self.stdscr.scrollok(True)
-        self.stdscr.idcok(False)
-        client.invoke_shell(height=height, recv_callback=self.on_recv)
+        self.pad.keypad(True)
+        self.pad.timeout(50)
+        self.pad.scrollok(True)
+        self.pad.idcok(False)
+        self.client.invoke_shell(height=self.height, width=self.width, recv_callback=self.on_recv)
         self.send_input()
 
+    def resize_terminal(self):
+        self.height, self.width = self.stdscr.getmaxyx()
+        logger.info('Resizing to Height: %s Width: %s', self.height, self.width)
+        self.client.resize_terminal(height=self.height, width=self.width)
+
     def send_input(self):
-        while self.client.shell_active:
-            char = self.stdscr.getch()
-            if self.client.shell_active and not char == -1:
-                value = special_keys.get(char) or chr(char)
-                self.client.send(value)
-        self.close()
+        try:
+            while self.client.shell_active:
+                char = self.pad.getch()
+                if self.client.shell_active and not char == -1:
+                    logger.info('Captured %s', char)
+                    if char == curses.KEY_RESIZE:
+                        self.resize_terminal()
+                    elif char == curses.KEY_SPREVIOUS:
+                        logger.info('SPREVIOUS')
+                    elif char == curses.KEY_SNEXT:
+                        logger.info('SNEXT')
+                    else:
+                        value = special_keys.get(char) or chr(char)
+                        logger.info('Sending %s as %s', char, value)
+                        self.client.send(value)
+        except BaseException as e:
+            logger.exception("Uncaught exception: {0}".format(str(e)))
+        finally:
+            self.close()
 
     def addstr(self, lineno, char_seq: CharSeq):
-        self.stdscr.addstr(
+        logger.info('Adding %s chars to curses lineno %s column %s', len(char_seq['text']), lineno, char_seq['column'])
+        self.height, self.width = self.stdscr.getmaxyx()
+        logger.info('Height: %s Width: %s', self.height, self.width)
+        self.pad.addstr(
             lineno, char_seq['column'], char_seq['text'], char_seq['attrs'])
+        logger.info('Refresh complete')
 
     def on_recv(self, data: bytes):
-        if self.client.shell_active:
-            cursors = self.client.cursors()
-            cursors = (cursors[0], cursors[1])
-            self.stdscr.move(*cursors)
-            changes = self.client.display_screen_line_changes()
-            for lineno, chars in changes.items():
-                current_char_seq: CharSeq = {'column': 0, 'text': '', 'attrs': 0}  # Create first sequence for line
-                for column, char in chars.items():
-                    text = char.data
-                    attrs = self.color_pair if self.color_pair else get_color_pair(char.fg, char.bg)
-                    if char.bold:
-                        attrs += curses.A_BOLD
-                    if char.italics:
-                        attrs += curses.A_ITALIC
-                    if char.underscore:
-                        attrs += curses.A_UNDERLINE
-                    if char.strikethrough:
-                        text = text + "\u0336"   # Strikethrough not directly supported in curses
-                    if char.reverse:
-                        attrs += curses.A_REVERSE
-                    if getattr(char, "blink", False):       # Blink added to pyte but not in latest official release yet
-                        attrs += curses.A_BLINK
-                    if not text:
-                        current_char_seq['text'] = text     # Initial char sequence
-                        current_char_seq['attrs'] = attrs
-                    elif attrs == current_char_seq['attrs']:
-                        current_char_seq['text'] += text   # Append to existing string with same attrs
-                    else:
-                        # Attrs have changed. Write old character sequence and create new
-                        self.addstr(lineno, current_char_seq)
-                        current_char_seq = {'text': char.data, 'attrs': attrs, 'column': column}
+        try:
+            if self.client.shell_active:
+                changes = self.client.display_screen_line_changes()
+                logger.info('The following lines have changed: %s', list(changes.keys()))
+                for lineno, chars in changes.items():
+                    logger.info('Line %s has %s chars', lineno, len(chars))
+                    column = 0
+                    current_char_seq: CharSeq = {'column': column, 'text': '', 'attrs': 0}  # Create first sequence for line
+                    for column, char in chars.items():
+                        text = char.data
+                        attrs = self.color_pair if self.color_pair else get_color_pair(char.fg, char.bg)
+                        if char.bold:
+                            attrs += curses.A_BOLD
+                        if char.italics:
+                            attrs += curses.A_ITALIC
+                        if char.underscore:
+                            attrs += curses.A_UNDERLINE
+                        if char.strikethrough:
+                            text = text + "\u0336"   # Strikethrough not directly supported in curses
+                        if char.reverse:
+                            attrs += curses.A_REVERSE
+                        if getattr(char, "blink", False):       # Blink added to pyte but not in latest official release yet
+                            attrs += curses.A_BLINK
+                        if not text:
+                            current_char_seq['text'] = text     # Initial char sequence
+                            current_char_seq['attrs'] = attrs
+                        elif attrs == current_char_seq['attrs']:
+                            current_char_seq['text'] += text   # Append to existing string with same attrs
+                        else:
+                            # Attrs have changed. Write old character sequence and create new
+                            self.addstr(lineno, current_char_seq)
+                            current_char_seq = {'text': char.data, 'attrs': attrs, 'column': column}
 
-                if current_char_seq['text']:
-                    self.addstr(lineno, current_char_seq)  # Write final sequence for this line
-            self.stdscr.refresh()
+                    logger.info('Adding line 1')
+                    if current_char_seq['text']:
+                        logger.info('Adding line 2')
+                        self.addstr(lineno, current_char_seq)  # Write final sequence for this line
+
+                    # Delete remaining characters in line
+                    logger.info('Adding line 3')
+                    column += 1
+                    text = ' '.join(['' for _ in range(column, self.width)])
+                    if text:
+                        logger.info('Deleting remaining chars')
+                        current_char_seq: CharSeq = {'column': column, 'text': text, 'attrs': 0}
+                        self.addstr(lineno, current_char_seq)
+
+                logger.info('Adding line 4')
+                cursors = self.client.cursors()
+                cursors = (cursors[0], cursors[1])
+                logger.info('Setting cursors to %s %s', cursors[0], cursors[1])
+                self.pad.move(*cursors)
+                """ if indexes['i'] < len(scrolls):
+                    rows = scrolls[indexes['i']]
+                    indexes['i'] += 1
+                else:
+                    rows = 0
+                logger.info('Scrolling to %s', rows)"""
+                logger.info('Refreshing')
+                self.pad.refresh(0, 0, 0, 0, self.height - 1, self.width - 1)
+                logger.info('Refresh complete')
+
+                logger.info('Cursors are at %s', self.stdscr.getyx())
+        except BaseException as e:
+            logger.exception("Uncaught exception: {0}".format(str(e)))
+            self.client.close()
 
     def close(self):
-        self.stdscr.scrollok(False)
+        self.pad.scrollok(False)
         self.client.close()
         self.client.wait_closed()
 
 
 def main(stdscr: curses.window):
     host = '127.0.0.1'
+    # host = '192.168.8.244'
     port = 22
-    client = Client(host, port=port, x11=True, term='xterm-256color')
+    logger.info('Connecting to %s', host)
+    client = Client(host, port=port, x11=True, term='xterm-256color', known_hosts_policy="auto")
+    # client = Client(host', port=port, x11=True, username="paulmartin", term='xterm-256color', known_hosts_policy="auto")
     client.connect()
     Terminal(client, stdscr)
 

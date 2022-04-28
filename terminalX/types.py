@@ -4,7 +4,7 @@ from pathlib import Path
 File = str | Path
 DisabledAlgorithms = dict[str, Iterable[str]]
 StringDict = dict[str, str]
-KnownHostsPolicy = Literal["reject", "auto", "warning"]
+KnownHostsPolicy = Literal["reject", "auto", "warn"]
 ProxyVersion = Literal["socks5", "socks4", "http"]
 
 

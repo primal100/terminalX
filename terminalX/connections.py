@@ -1,4 +1,4 @@
-import os
+import getpass
 import socket
 
 import paramiko
@@ -54,7 +54,7 @@ class Client:
     host: str
     port: int = 22
     name: str = None
-    username: str = field(default_factory=os.getlogin)
+    username: str = field(default_factory=getpass.getuser)
     key_filename: File = None
     timeout: int = None
     allow_agent: bool = False           # True when https://github.com/paramiko/paramiko/pull/2010 is merged
@@ -200,6 +200,12 @@ class Client:
             self.ssh_client.open_socks_proxy(t[0], t[1])
         for t in self.tunnels:
             self.setup_tunnel(t)
+
+    def resize_terminal(self, width: int = None, height: int = None):
+        width = width or self.screen.columns
+        height = height or self.screen.lines
+        self.screen.resize(height, width)
+        self.ssh_shell.resize_pty(width, height)
 
     def setup_tunnel(self, tunnel: TunnelConfig):
         forward_server = forward_tunnel(tunnel['src'][1], tunnel['dst'][0], tunnel['dst'][1], self.transport,
