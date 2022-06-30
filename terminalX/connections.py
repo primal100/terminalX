@@ -97,10 +97,11 @@ class Client:
     session: paramiko.Channel = field(init=False, repr=False, hash=False, compare=False, default=None)
     ssh_shell: paramiko.Channel | ProxyCommand = field(init=False, repr=False, hash=False, compare=False, default=None)
     transport: paramiko.Transport = field(init=False, repr=False, hash=False, compare=False, default=None)
-    screen: pyte.Screen = field(init=False, repr=False, hash=False, compare=False, default=None)
+    screen: pyte.HistoryScreen = field(init=False, repr=False, hash=False, compare=False, default=None)
     stream: pyte.Stream = field(init=False, repr=False, hash=False, compare=False, default=None)
     receive_thread: threading.Thread = field(init=False, repr=False, hash=False, compare=False, default=None)
     shell_active_event: threading.Event = field(init=False, repr=False, hash=False, compare=False, default_factory=threading.Event)
+    receive_callback: Callable[[Optional[bytes]], None] = None
 
     def full_name(self) -> str:
         name = self.name or self.host
@@ -201,11 +202,24 @@ class Client:
         for t in self.tunnels:
             self.setup_tunnel(t)
 
-    def resize_terminal(self, width: int = None, height: int = None):
+    def scroll_up(self):
+        self.screen.prev_page()
+        self.receive_callback(None)
+
+    def scroll_down(self):
+        self.screen.next_page()
+        self.receive_callback(None)
+
+    def resize_terminal(self, width: int = None, height: int = None, logger=None):
         width = width or self.screen.columns
         height = height or self.screen.lines
-        self.screen.resize(height, width)
-        self.ssh_shell.resize_pty(width, height)
+        if self.ssh_shell:
+            logger.info('Resizing screen')
+            self.screen.resize(height, width)
+            logger.info('Resizing pty')
+            self.ssh_shell.resize_pty(width, height)
+            if self.receive_callback:
+                self.receive_callback(None)
 
     def setup_tunnel(self, tunnel: TunnelConfig):
         forward_server = forward_tunnel(tunnel['src'][1], tunnel['dst'][0], tunnel['dst'][1], self.transport,
@@ -249,8 +263,8 @@ class Client:
         self.screen = pyte.HistoryScreen(width, height, history=history)
         self.stream = pyte.Stream(self.screen)
         self.shell_active_event.set()
+        self.receive_callback = recv_callback
         self.receive_thread = threading.Thread(target=self.receive_always,
-                                               kwargs={'callback': recv_callback},
                                                daemon=True)
         self.receive_thread.start()
 
@@ -291,7 +305,7 @@ class Client:
         except OSError:
             self.shell_active_event.clear()
 
-    def receive(self, callback: [[], None] = None):
+    def receive(self):
         data = self.ssh_shell.recv(9999)
         logging.debug('Received data %s bytes', len(data))
         logging.debug('Received data %s', data)
@@ -300,14 +314,14 @@ class Client:
         else:
             logger.debug('Clearing shell event')
             self.shell_active_event.clear()
-        if callback:
-            callback(data)
+        if self.receive_callback:
+            self.receive_callback(data)
 
-    def receive_always(self, callback: Callable[[], None] = None):
+    def receive_always(self):
         if not self.ssh_shell:
             raise NoShellException
         while self.shell_active_event.is_set():
-            self.receive(callback=callback)
+            self.receive()
 
     def display_screen(self) -> list[str]:
         if self.screen:

@@ -6,6 +6,8 @@ from terminalX.types import CharSeq
 import curses
 from pathlib import Path
 from terminalX.utils import static
+import pdb
+import threading
 
 
 file_path = Path(os.path.realpath(__file__)).parent
@@ -14,7 +16,7 @@ log_file = file_path / "log.txt"
 
 logger = logging.getLogger()
 handler = logging.FileHandler(log_file, mode='w')
-handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
+handler.setFormatter(logging.Formatter('%(asctime)s %(lineno)d %(message)s'))
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 logger.info('Version %s', 1.0)
@@ -63,6 +65,8 @@ special_keys = {
     curses.PADSLASH: esc + "Oo",
     curses.PADSTAR: esc + "Oj",
     curses.PAD0: esc + "Op",
+    curses.KEY_SPREVIOUS: esc + "0[5;2~",
+    curses.KEY_SNEXT: esc + "0[6;2~",
 
     curses.KEY_C1: '1',
     curses.KEY_C2: '2',
@@ -132,37 +136,43 @@ scrolls = [0, 2, 3, 4, 6, 0]
 
 class Terminal:
     def __init__(self, client: Client, stdscr: curses.window, fixed_colors: tuple[str, str] = None):
+        self.resized = threading.Event()
         self.client = client
         self.stdscr = stdscr
         self.height, self.width = self.stdscr.getmaxyx()
         logger.info('Height: %s Width: %s', self.height, self.width)
-        self.pad = curses.newpad(self.height * 10, self.width)
         curses.use_default_colors()
         self.color_pair = get_color_pair(*fixed_colors) if fixed_colors else None
-        self.pad.keypad(True)
-        self.pad.timeout(50)
-        self.pad.scrollok(True)
-        self.pad.idcok(False)
+        self.stdscr.keypad(True)
+        self.stdscr.timeout(50)
+        self.stdscr.scrollok(True)
+        self.stdscr.idcok(False)
         self.client.invoke_shell(height=self.height, width=self.width, recv_callback=self.on_recv)
         self.send_input()
 
     def resize_terminal(self):
         self.height, self.width = self.stdscr.getmaxyx()
         logger.info('Resizing to Height: %s Width: %s', self.height, self.width)
-        self.client.resize_terminal(height=self.height, width=self.width)
+        self.stdscr.refresh()
+        self.client.resize_terminal(height=self.height, width=self.width, logger=logger)
+        self.resized.set()
+        value = special_keys.get(curses.KEY_SNEXT)
+        logger.info('Sending curses.KEY_SNEXT as %s', value)
+        self.client.send(value)
+        logger.info('Resize complete')
 
     def send_input(self):
         try:
             while self.client.shell_active:
-                char = self.pad.getch()
+                char = self.stdscr.getch()
                 if self.client.shell_active and not char == -1:
                     logger.info('Captured %s', char)
                     if char == curses.KEY_RESIZE:
                         self.resize_terminal()
                     elif char == curses.KEY_SPREVIOUS:
-                        logger.info('SPREVIOUS')
+                        self.client.scroll_up()
                     elif char == curses.KEY_SNEXT:
-                        logger.info('SNEXT')
+                        self.client.scroll_down()
                     else:
                         value = special_keys.get(char) or chr(char)
                         logger.info('Sending %s as %s', char, value)
@@ -173,14 +183,14 @@ class Terminal:
             self.close()
 
     def addstr(self, lineno, char_seq: CharSeq):
-        logger.info('Adding %s chars to curses lineno %s column %s', len(char_seq['text']), lineno, char_seq['column'])
-        self.height, self.width = self.stdscr.getmaxyx()
-        logger.info('Height: %s Width: %s', self.height, self.width)
-        self.pad.addstr(
-            lineno, char_seq['column'], char_seq['text'], char_seq['attrs'])
-        logger.info('Refresh complete')
+        logger.info('Adding %s chars to curses lineno %s column %s: %s', len(char_seq['text']), lineno, char_seq['column'], char_seq['text'])
+        height, width = self.stdscr.getmaxyx()
+        logger.info('Height: %s Width: %s', height, width)
+        self.stdscr.addstr(lineno, char_seq['column'], char_seq['text'], char_seq['attrs'])
 
     def on_recv(self, data: bytes):
+        logger.info('RECEIVED')
+        logger.info(data)
         try:
             if self.client.shell_active:
                 changes = self.client.display_screen_line_changes()
@@ -228,20 +238,11 @@ class Terminal:
                         current_char_seq: CharSeq = {'column': column, 'text': text, 'attrs': 0}
                         self.addstr(lineno, current_char_seq)
 
-                logger.info('Adding line 4')
                 cursors = self.client.cursors()
                 cursors = (cursors[0], cursors[1])
                 logger.info('Setting cursors to %s %s', cursors[0], cursors[1])
-                self.pad.move(*cursors)
-                """ if indexes['i'] < len(scrolls):
-                    rows = scrolls[indexes['i']]
-                    indexes['i'] += 1
-                else:
-                    rows = 0
-                logger.info('Scrolling to %s', rows)"""
-                logger.info('Refreshing')
-                self.pad.refresh(0, 0, 0, 0, self.height - 1, self.width - 1)
-                logger.info('Refresh complete')
+                self.stdscr.move(*cursors)
+                self.stdscr.refresh()
 
                 logger.info('Cursors are at %s', self.stdscr.getyx())
         except BaseException as e:
@@ -249,18 +250,16 @@ class Terminal:
             self.client.close()
 
     def close(self):
-        self.pad.scrollok(False)
+        self.stdscr.scrollok(False)
         self.client.close()
         self.client.wait_closed()
 
 
 def main(stdscr: curses.window):
     host = '127.0.0.1'
-    # host = '192.168.8.244'
     port = 22
     logger.info('Connecting to %s', host)
     client = Client(host, port=port, x11=True, term='xterm-256color', known_hosts_policy="auto")
-    # client = Client(host', port=port, x11=True, username="paulmartin", term='xterm-256color', known_hosts_policy="auto")
     client.connect()
     Terminal(client, stdscr)
 
