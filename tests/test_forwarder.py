@@ -1,4 +1,4 @@
-from terminalX.forwarder import forward_tunnel, ForwardServer
+from terminalX.forwarder import forward_tunnel
 import time
 
 

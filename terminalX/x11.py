@@ -13,7 +13,13 @@ import subprocess
 
 logger = logging.getLogger(__name__)
 
-x11_server = ('127.0.0.1', 6000)
+
+if os.name == "nt" or not hasattr(socket, 'AF_UNIX'):
+    x11_server = ('127.0.0.1', 6000)
+    x11_family = socket.AF_INET
+else:
+    x11_server = '/tmp/.X11-unix/X0'
+    x11_family = socket.AF_UNIX
 
 
 class X11ServerConnectionFailure(BaseException):
@@ -68,9 +74,10 @@ def start_x11_server() -> bool:
 
 
 def connect_to_x11_server(x11_try_start_server: bool = False) -> socket.socket:
-    local_x11_socket = socket.socket()
+    local_x11_socket = socket.socket(family=x11_family)
     for i in range(0, 2):
         try:
+            logger.debug('Connecting to X11 server %s', x11_server)
             local_x11_socket.connect(x11_server)
             break
         except socket.error as e:
@@ -106,6 +113,7 @@ def x11_handler(channels: dict[int, tuple], selector: selectors.BaseSelector, x1
     """
     Run in thread so as not to block terminal while connectiing to x11 server
     """
+    logger.info('Running X11 handler')
     executor.submit(_x11_handler, channels, selector, x11_try_start_server, channel, address)
 
 

@@ -203,12 +203,14 @@ class Client:
                                     auth_timeout=self.auth_timeout, gss_trust_dns=self.gss_trust_dns, passphrase=passphrase,
                                     disabled_algorithms=self.disabled_algorithms)
         except paramiko.SSHException as e:   # Suggest PR for paramiko to raise AuthenticationException instead
+            logger.info(str(e))
             self.transport = self.ssh_client.get_transport()         # As paramiko raises SSHException in case authentication fails, need to check if it's because Authentication failed or something else
             if not self.transport or not self.transport.is_active():
                 raise           # Connection error not related to authentication
             try:
                 self.auth_interactive_dumb(self.username, handler=interactive_login_handler)
             except paramiko.BadAuthenticationType as e:
+                logger.info(str(e))
                 if "password" in str(e) and not password and ask_password_callback:
                     password = ask_password_callback(self.username)
                     self.transport.auth_password(self.username, password)

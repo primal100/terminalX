@@ -6,7 +6,6 @@ from terminalX.types import CharSeq
 import curses
 from pathlib import Path
 from terminalX.utils import static
-import pdb
 import threading
 
 
@@ -58,24 +57,24 @@ special_keys = {
     curses.KEY_F10: esc + "O[21~",
     curses.KEY_F11: esc + "O[23~",
     curses.KEY_F12: esc + "O[24~",
-    curses.PADENTER: esc + "OM",
-    curses.PADSTOP: esc + "On",
-    curses.PADPLUS: esc + "Ok",
-    curses.PADMINUS: esc + "Om",
-    curses.PADSLASH: esc + "Oo",
-    curses.PADSTAR: esc + "Oj",
-    curses.PAD0: esc + "Op",
+    # curses.PADENTER: esc + "OM",
+    # curses.PADSTOP: esc + "On",
+    # curses.PADPLUS: esc + "Ok",
+    # curses.PADMINUS: esc + "Om",
+    # curses.PADSLASH: esc + "Oo",
+    # curses.PADSTAR: esc + "Oj",
+    # curses.PAD0: esc + "Op",
     curses.KEY_SPREVIOUS: esc + "0[5;2~",
     curses.KEY_SNEXT: esc + "0[6;2~",
 
     curses.KEY_C1: '1',
-    curses.KEY_C2: '2',
+    # curses.KEY_C2: '2',
     curses.KEY_C3: '3',
-    curses.KEY_B1: '4',
+    # curses.KEY_B1: '4',
     curses.KEY_B2: '5',
-    curses.KEY_B3: '6',
+    # curses.KEY_B3: '6',
     curses.KEY_A1: '7',
-    curses.KEY_A2: '8',
+    # curses.KEY_A2: '8',
     curses.KEY_A3: '9'
 
     # Application Codes:
@@ -152,21 +151,21 @@ class Terminal:
 
     def resize_terminal(self):
         self.height, self.width = self.stdscr.getmaxyx()
-        logger.info('Resizing to Height: %s Width: %s', self.height, self.width)
+        logger.debug('Resizing to Height: %s Width: %s', self.height, self.width)
         self.stdscr.refresh()
         self.client.resize_terminal(height=self.height, width=self.width, logger=logger)
         self.resized.set()
         value = special_keys.get(curses.KEY_SNEXT)
-        logger.info('Sending curses.KEY_SNEXT as %s', value)
+        logger.debug('Sending curses.KEY_SNEXT as %s', value)
         self.client.send(value)
-        logger.info('Resize complete')
+        logger.debug('Resize complete')
 
     def send_input(self):
         try:
             while self.client.shell_active:
                 char = self.stdscr.getch()
                 if self.client.shell_active and not char == -1:
-                    logger.info('Captured %s', char)
+                    logger.debug('Captured %s', char)
                     if char == curses.KEY_RESIZE:
                         self.resize_terminal()
                     elif char == curses.KEY_SPREVIOUS:
@@ -175,7 +174,7 @@ class Terminal:
                         self.client.scroll_down()
                     else:
                         value = special_keys.get(char) or chr(char)
-                        logger.info('Sending %s as %s', char, value)
+                        logger.debug('Sending %s as %s', char, value)
                         self.client.send(value)
         except BaseException as e:
             logger.exception("Uncaught exception: {0}".format(str(e)))
@@ -183,20 +182,19 @@ class Terminal:
             self.close()
 
     def addstr(self, lineno, char_seq: CharSeq):
-        logger.info('Adding %s chars to curses lineno %s column %s: %s', len(char_seq['text']), lineno, char_seq['column'], char_seq['text'])
+        logger.debug('Adding %s chars to curses lineno %s column %s: %s', len(char_seq['text']), lineno, char_seq['column'], char_seq['text'])
         height, width = self.stdscr.getmaxyx()
-        logger.info('Height: %s Width: %s', height, width)
+        logger.debug('Height: %s Width: %s', height, width)
         self.stdscr.addstr(lineno, char_seq['column'], char_seq['text'], char_seq['attrs'])
 
     def on_recv(self, data: bytes):
-        logger.info('RECEIVED')
-        logger.info(data)
+        logger.debug(data)
         try:
             if self.client.shell_active:
                 changes = self.client.display_screen_line_changes()
-                logger.info('The following lines have changed: %s', list(changes.keys()))
+                logger.debug('The following lines have changed: %s', list(changes.keys()))
                 for lineno, chars in changes.items():
-                    logger.info('Line %s has %s chars', lineno, len(chars))
+                    logger.debug('Line %s has %s chars', lineno, len(chars))
                     column = 0
                     current_char_seq: CharSeq = {'column': column, 'text': '', 'attrs': 0}  # Create first sequence for line
                     for column, char in chars.items():
@@ -224,27 +222,24 @@ class Terminal:
                             self.addstr(lineno, current_char_seq)
                             current_char_seq = {'text': char.data, 'attrs': attrs, 'column': column}
 
-                    logger.info('Adding line 1')
                     if current_char_seq['text']:
-                        logger.info('Adding line 2')
                         self.addstr(lineno, current_char_seq)  # Write final sequence for this line
 
                     # Delete remaining characters in line
-                    logger.info('Adding line 3')
                     column += 1
                     text = ' '.join(['' for _ in range(column, self.width)])
                     if text:
-                        logger.info('Deleting remaining chars')
+                        logger.debug('Deleting remaining chars')
                         current_char_seq: CharSeq = {'column': column, 'text': text, 'attrs': 0}
                         self.addstr(lineno, current_char_seq)
 
                 cursors = self.client.cursors()
                 cursors = (cursors[0], cursors[1])
-                logger.info('Setting cursors to %s %s', cursors[0], cursors[1])
+                logger.debug('Setting cursors to %s %s', cursors[0], cursors[1])
                 self.stdscr.move(*cursors)
                 self.stdscr.refresh()
 
-                logger.info('Cursors are at %s', self.stdscr.getyx())
+                logger.debug('Cursors are at %s', self.stdscr.getyx())
         except BaseException as e:
             logger.exception("Uncaught exception: {0}".format(str(e)))
             self.client.close()
