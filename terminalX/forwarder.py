@@ -22,7 +22,6 @@
 # Inspired by https://raw.githubusercontent.com/paramiko/paramiko/main/demos/forward.py
 
 from functools import partial
-import select
 import selectors
 import socketserver
 import threading

@@ -10,7 +10,7 @@ def test_ssh_connection_full_name(ssh_client, ssh_host, username):
 
 def test_ssh_connection(ssh_client):
     ssh_client.connect()
-    assert ssh_client.transport
+    assert ssh_client.transport and ssh_client.transport.is_active() and ssh_client.transport.is_authenticated()
 
 
 def find_terminal_lines(display: list[str]) -> list[str]:
@@ -21,14 +21,23 @@ def test_ssh_terminal(ssh_client_connected):
     ssh_client_connected.invoke_shell()
     screen = ssh_client_connected.display_screen()
     assert screen
+    line_changes = ssh_client_connected.display_screen_line_changes()
+    assert len(line_changes) == len(screen)
     ssh_client_connected.send('echo Hello World')
-    time.sleep(0.3)
+    time.sleep(180)
     screen = ssh_client_connected.display_screen()
-    assert "echo Hello World" in find_terminal_lines(screen)[-1]
+    terminal_lines = find_terminal_lines(screen)
+    assert "echo Hello World" in terminal_lines[-1]
+    line_changes = ssh_client_connected.display_screen_line_changes()
+    current_line = ssh_client_connected.cursors()[0]
+    assert len(line_changes) == 1
+    assert "echo Hello World" in line_changes[current_line]
     ssh_client_connected.send('\n')
     time.sleep(0.3)
     screen = ssh_client_connected.display_screen()
     assert find_terminal_lines(screen)[-2].startswith('Hello World')
+    line_changes = ssh_client_connected.display_screen_line_changes()
+    assert len(line_changes) == 2
 
 
 def test_ssh_terminal_file_editing(ssh_client_with_shell):
@@ -120,3 +129,18 @@ def test_ssh_jump_server(ssh_client_via_jump_server):
     screen = find_terminal_lines(ssh_client_via_jump_server.display_screen())
     assert screen[-2].startswith('Hello World')
     ssh_client_via_jump_server.close()
+
+
+def test_ssh_x11(ssh_client_x11):
+    ssh_client_x11.connect()
+    ssh_client_x11.invoke_shell()
+    screen = ssh_client_x11.display_screen()
+    assert screen
+    ssh_client_x11.send('echo $DISPLAY\n')
+    time.sleep(0.3)
+    screen = ssh_client_x11.display_screen()
+    assert "echo $DISPLAY" in find_terminal_lines(screen)[-3]
+    assert find_terminal_lines(screen)[-2].startswith('localhost:')
+    ssh_client_x11.send('xterm\n')
+    print('xterm window should appear now')
+    time.sleep(20)

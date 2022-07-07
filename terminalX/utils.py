@@ -23,3 +23,17 @@ def parse_string_placeholders(text: str, remote_host: str = "", remote_port: int
     for k, v in get_placeholders(remote_host, remote_port, remote_username, remote_home).items():
         text = text.replace(k, v)
     return text
+
+
+def static(**kwargs):
+    """
+    # https://stackoverflow.com/questions/279561/what-is-the-python-equivalent-of-static-variables-inside-a-function
+    To allow static variables in a function
+    :param kwargs: static variables and initial value
+    :return: The function
+    """
+    def decorate(func):
+        for k in kwargs:
+            setattr(func, k, kwargs[k])
+        return func
+    return decorate

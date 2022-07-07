@@ -2,3 +2,4 @@ paramiko
 psutil
 python-socks
 pyte
+windows-curses; os_name == 'nt'

@@ -1,9 +1,11 @@
+import getpass
 import socket
 
 import paramiko
 import pyte
 from dataclasses import dataclass, field, replace
 from python_socks.sync import Proxy, ProxyType
+import logging
 import threading
 import time
 
@@ -11,7 +13,11 @@ from .client import SSHClient
 from .forwarder import forward_tunnel, ForwardServer
 from .proxy_command import ProxyCommand
 from .types import DisabledAlgorithms, StringDict, File, KnownHostsPolicy, ProxyJump, ProxyJumpPasswords, ProxyVersion, TunnelConfig
-from typing import Generator, List, Optional, Tuple, Union
+from .x11 import register_x11
+from typing import Callable, Generator, Optional
+
+
+logger = logging.getLogger()
 
 
 class NotConnectedException(BaseException):
@@ -20,6 +26,10 @@ class NotConnectedException(BaseException):
 
 class NoShellException(BaseException):
     message = "SSH Client shell does not exist. Call the .invoke_shell() method first"
+
+
+class ShellNotStartedException(BaseException):
+    pass
 
 
 class SSHConfigurationException(BaseException):
@@ -44,7 +54,7 @@ class Client:
     host: str
     port: int = 22
     name: str = None
-    username: str = None
+    username: str = field(default_factory=getpass.getuser)
     key_filename: File = None
     timeout: int = None
     allow_agent: bool = False           # True when https://github.com/paramiko/paramiko/pull/2010 is merged
@@ -65,6 +75,8 @@ class Client:
     x11: bool = True
     x11_screen_number: int = 0
     x11_auth_protocol: str = "MIT-MAGIC-COOKIE-1"
+    x11_try_start_server: bool = True
+    threads: list[threading.Thread] = field(init=False, repr=False, hash=False, compare=False, default_factory=list)
     known_hosts_policy: KnownHostsPolicy = "auto"
     jump_hosts: list[ProxyJump] = None
     sub_clients: list['Client'] = field(init=False, repr=False, compare=False, hash=False, default_factory=list)
@@ -75,19 +87,21 @@ class Client:
     proxy_password: str = None
     proxy_version: ProxyVersion = "socks5"
     socks_rdns: Optional[bool] = None
-    socks_tunnels: Optional[list[Tuple[str, int]]] = field(default_factory=list)
+    socks_tunnels: Optional[list[tuple[str, int]]] = field(default_factory=list)
     tunnels: Optional[list[TunnelConfig]] = field(default_factory=list)
     forward_tunnels: list[ForwardServer] = field(init=False, repr=False, hash=False, compare=False,
                                                  default_factory=list)
     ssh_client: SSHClient = field(init=False, repr=False, hash=False, compare=False,
                                   default_factory=SSHClient)
     sftp_client: paramiko.SFTPClient = field(init=False, repr=False, hash=False, compare=False, default=None)
-    ssh_shell: Union[paramiko.Channel, ProxyCommand] = field(init=False, repr=False, hash=False, compare=False, default=None)
+    session: paramiko.Channel = field(init=False, repr=False, hash=False, compare=False, default=None)
+    ssh_shell: paramiko.Channel | ProxyCommand = field(init=False, repr=False, hash=False, compare=False, default=None)
     transport: paramiko.Transport = field(init=False, repr=False, hash=False, compare=False, default=None)
-    screen: pyte.Screen = field(init=False, repr=False, hash=False, compare=False, default=None)
+    screen: pyte.HistoryScreen = field(init=False, repr=False, hash=False, compare=False, default=None)
     stream: pyte.Stream = field(init=False, repr=False, hash=False, compare=False, default=None)
     receive_thread: threading.Thread = field(init=False, repr=False, hash=False, compare=False, default=None)
-    shell_active: threading.Event = field(init=False, repr=False, hash=False, compare=False, default_factory=threading.Event)
+    shell_active_event: threading.Event = field(init=False, repr=False, hash=False, compare=False, default_factory=threading.Event)
+    receive_callback: Callable[[Optional[bytes]], None] = None
 
     def full_name(self) -> str:
         name = self.name or self.host
@@ -98,8 +112,36 @@ class Client:
     def connect_with_proxy_command(self) -> ProxyCommand:
         return ProxyCommand(self.proxy_command)
 
+    def auth_interactive_dumb(self, username: str, handler: Callable[[str, str, list], list[str]] = None,
+                              submethods: str = ""):
+        """
+        Autenticate to the server interactively but dumber.
+        Just print the prompt and / or instructions to stdout and send back
+        the response. This is good for situations where partial auth is
+        achieved by key and then the user has to enter a 2fac token.
+        Alternative to built in function, using getpass instead of input
+        Perhaps should be PR to Paramiko to use getpass instead of input
+        """
+
+        if not handler:
+
+            def handler(title, instructions, prompt_list):
+                answers = []
+                if title:
+                    print(title.strip())
+                if instructions:
+                    print(instructions.strip())
+                for prompt, show_input in prompt_list:
+                    print(prompt.strip(), end=" ")
+                    answers.append(getpass.getpass(prompt))
+                return answers
+
+        return self.transport.auth_interactive(username, handler, submethods)
+
     def connect(self, passphrase: str = None, password: str = None, sock: socket.socket = None,
-                jump_hosts_passwords: dict[str, ProxyJumpPasswords] = None) -> None:
+                jump_hosts_passwords: dict[str, ProxyJumpPasswords] = None,
+                interactive_login_handler: Callable[[str, str, list[str]], list[str]] = None,
+                ask_password_callback: Callable[[str], str] = None) -> None:
         """
         Raises:
         BadHostKeyException – if the server’s host key could not be verified
@@ -152,21 +194,57 @@ class Client:
                 dest_addr=(self.host, self.port),
                 src_addr=jump_transport.getpeername(),
             )
-
-        self.ssh_client.connect(self.host, port=self.port, username=self.username, password=password,
-                                key_filename=self.key_filename, timeout=self.timeout, sock=sock,
-                                allow_agent=self.allow_agent, look_for_keys=self.look_for_keys, compress=self.compress,
-                                gss_auth=self.gss_auth, gss_kex=self.gss_kex, gss_deleg_creds=self.gss_deleg_creds,
-                                gss_host=self.gss_host, banner_timeout=self.banner_timeout,
-                                auth_timeout=self.auth_timeout, gss_trust_dns=self.gss_trust_dns, passphrase=passphrase,
-                                disabled_algorithms=self.disabled_algorithms)
-        self.transport = self.ssh_client.get_transport()
+        try:
+            self.ssh_client.connect(self.host, port=self.port, username=self.username, password=password,
+                                    key_filename=self.key_filename, timeout=self.timeout, sock=sock,
+                                    allow_agent=self.allow_agent, look_for_keys=self.look_for_keys, compress=self.compress,
+                                    gss_auth=self.gss_auth, gss_kex=self.gss_kex, gss_deleg_creds=self.gss_deleg_creds,
+                                    gss_host=self.gss_host, banner_timeout=self.banner_timeout,
+                                    auth_timeout=self.auth_timeout, gss_trust_dns=self.gss_trust_dns, passphrase=passphrase,
+                                    disabled_algorithms=self.disabled_algorithms)
+        except paramiko.SSHException as e:   # Suggest PR for paramiko to raise AuthenticationException instead
+            logger.info(str(e))
+            self.transport = self.ssh_client.get_transport()         # As paramiko raises SSHException in case authentication fails, need to check if it's because Authentication failed or something else
+            if not self.transport or not self.transport.is_active():
+                raise           # Connection error not related to authentication
+            try:
+                self.auth_interactive_dumb(self.username, handler=interactive_login_handler)
+            except paramiko.BadAuthenticationType as e:
+                logger.info(str(e))
+                if "password" in str(e) and not password and ask_password_callback:
+                    password = ask_password_callback(self.username)
+                    self.transport.auth_password(self.username, password)
+                else:
+                    raise paramiko.AuthenticationException(
+                        "Unable to authenticate to this server with provided authentication methods and interactive login not enabled on server side. ")
+        else:
+            self.transport = self.ssh_client.get_transport()
         if self.keepalive_interval:
             self.transport.set_keepalive(self.keepalive_interval)
+        self.session = self.transport.open_session()
         for t in self.socks_tunnels:
             self.ssh_client.open_socks_proxy(t[0], t[1])
         for t in self.tunnels:
             self.setup_tunnel(t)
+
+    def scroll_up(self):
+        self.screen.prev_page()
+        self.receive_callback(None)
+
+    def scroll_down(self):
+        self.screen.next_page()
+        self.receive_callback(None)
+
+    def resize_terminal(self, width: int = None, height: int = None, logger=None):
+        width = width or self.screen.columns
+        height = height or self.screen.lines
+        if self.ssh_shell:
+            logger.info('Resizing screen')
+            self.screen.resize(height, width)
+            logger.info('Resizing pty')
+            self.ssh_shell.resize_pty(width, height)
+            if self.receive_callback:
+                self.receive_callback(None)
 
     def setup_tunnel(self, tunnel: TunnelConfig):
         forward_server = forward_tunnel(tunnel['src'][1], tunnel['dst'][0], tunnel['dst'][1], self.transport,
@@ -190,22 +268,29 @@ class Client:
         self.ssh_client.set_missing_host_key_policy(policy)
 
     def invoke_shell(self, width: int = 80, height: int = 24, width_pixels: int = 0, height_pixels: int = 0,
-                     history: int = 100):
+                     history: int = 100, recv_callback: Callable[[], None] = None):
         """
         Raises:	SSHException – if the request was rejected or the channel was closed
         """
         if not self.transport:
             raise NotConnectedException
         if not self.proxy_command:
-            self.ssh_shell = self.ssh_client.invoke_shell(term=self.term, width=width, height=height,
-                                                          width_pixels=width_pixels, height_pixels=height_pixels,
-                                                          environment=self.environment)
+            self.ssh_shell = self.transport.open_session()
+            if self.environment:
+                self.ssh_shell.update_environment(self.environment)
             if self.x11:
-                self.ssh_shell.request_x11(screen_number=self.x11_screen_number, auth_protocol=self.x11_auth_protocol)
-        self.screen = pyte.HistoryScreen(80, 24, history=history)
+                x11_thread = register_x11(self.ssh_shell, screen_number=self.x11_screen_number,
+                                          auth_protocol=self.x11_auth_protocol,
+                                          x11_try_start_server=self.x11_try_start_server)
+                self.threads.append(x11_thread)
+            self.ssh_shell.get_pty(self.term, width, height, width_pixels, height_pixels)
+            self.ssh_shell.invoke_shell()
+        self.screen = pyte.HistoryScreen(width, height, history=history)
         self.stream = pyte.Stream(self.screen)
-        self.shell_active.set()
-        self.receive_thread = threading.Thread(target=self.receive_always)
+        self.shell_active_event.set()
+        self.receive_callback = recv_callback
+        self.receive_thread = threading.Thread(target=self.receive_always,
+                                               daemon=True)
         self.receive_thread.start()
 
     def reconnect_existing(self, sock):
@@ -233,29 +318,48 @@ class Client:
         client.reconnect_existing(sock)
         return client
 
+    @property
+    def shell_active(self) -> bool:
+        return self.shell_active_event.is_set()
+
     def send(self, text: str):
         if not self.ssh_shell:
             raise NoShellException
-        self.ssh_shell.sendall(text.encode('utf-8'))
+        try:
+            self.ssh_shell.sendall(text.encode('utf-8'))
+        except OSError:
+            self.shell_active_event.clear()
 
     def receive(self):
         data = self.ssh_shell.recv(9999)
+        logging.debug('Received data %s bytes', len(data))
+        logging.debug('Received data %s', data)
         if data:
-            self.stream.feed(data.decode())
+            self.stream.feed(data.decode('utf-8', errors='ignore'))
+        else:
+            logger.debug('Clearing shell event')
+            self.shell_active_event.clear()
+        if self.receive_callback:
+            self.receive_callback(data)
 
     def receive_always(self):
         if not self.ssh_shell:
             raise NoShellException
-        while self.shell_active.is_set():
+        while self.shell_active_event.is_set():
             self.receive()
 
-    def display_screen(self) -> List[str]:
+    def display_screen(self) -> list[str]:
         if self.screen:
             return self.screen.display
         return []
 
-    def cursors(self) -> Tuple[int, int]:
-        return self.screen.cursor.x, self.screen.cursor.y
+    def cursors(self) -> tuple[int, int]:
+        return self.screen.cursor.y, self.screen.cursor.x,
+
+    def display_screen_line_changes(self) -> dict[int, dict[int, pyte.screens.Char]]:
+        changes = {line: self.screen.buffer[line] for line in self.screen.dirty}
+        self.screen.dirty.clear()
+        return changes
 
     def display_screen_as_text(self) -> str:
         display = self.display_screen()
@@ -267,6 +371,9 @@ class Client:
         client = self.duplicate()
         client.ssh_client.open_sftp()
         return client
+
+    def exec_command(self, command) -> None:
+        self.ssh_shell.exec_command(command)
 
     def command_result(self, command: str, bufsize: int = -1, timeout: int = 3, repeat: int = 1,
                        delay: int = 5) -> Generator[str, None, None]:
@@ -289,14 +396,22 @@ class Client:
         self.ssh_client.open_sftp()
 
     def close(self):
+        self.shell_active_event.clear()
         for server in self.forward_tunnels:
             server.shutdown()
         self.ssh_client.close()
         if self.transport:
             self.transport.close()
-        self.shell_active.clear()
         for client in self.sub_clients:
             client.close()
+
+    def wait_closed(self):
+        logger.debug('joining receive thread')
+        self.receive_thread.join()
+        logger.debug('joining x11 thread')
+        for thread in self.threads:
+            thread.join()
+        logger.debug('x11 thread joined')
 
     def save(self):
         pass

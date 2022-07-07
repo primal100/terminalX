@@ -1,25 +1,34 @@
-from typing import Iterable, Literal, Optional, Tuple, TypedDict, Union
+from typing import Iterable, Literal, Optional, TypedDict
 from pathlib import Path
 
-File = Union[str, Path]
+File = str | Path
 DisabledAlgorithms = dict[str, Iterable[str]]
 StringDict = dict[str, str]
-KnownHostsPolicy = Literal["reject", "auto", "warning"]
+KnownHostsPolicy = Literal["reject", "auto", "warn"]
 ProxyVersion = Literal["socks5", "socks4", "http"]
 
 
 class TunnelConfig(TypedDict):
-    src: Tuple[Optional[str], int]
-    dst: Tuple[str, int]
+    src: tuple[Optional[str], int]
+    dst: tuple[str, int]
 
 
-class ProxyJump(TypedDict):
+# Some paramaters listed as NotRequired with plan to use new feature coming in 3.11 when available
+
+
+class ProxyJump(TypedDict, total=False):
     host: str
-    port: Optional[int]
-    username: Optional[str]
-    key_filename: Union[str, Path, None]
+    port: Optional[int]                     # NotRequired
+    username: Optional[str]                 # NotRequired
+    key_filename: Optional[File]            # NotRequired
 
 
-class ProxyJumpPasswords(TypedDict):
-    password: Optional[str]
-    passphrase: Optional[str]
+class ProxyJumpPasswords(TypedDict, total=False):
+    password: Optional[str]                 # NotRequired
+    passphrase: Optional[str]               # NotRequired
+
+
+class CharSeq(TypedDict):
+    column: int
+    text: str
+    attrs: int
