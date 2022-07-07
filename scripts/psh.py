@@ -255,14 +255,19 @@ class Terminal:
         self.client.wait_closed()
 
 
-def main(stdscr: curses.window):
+def main(stdscr: curses.window, client: Client):
+    Terminal(client, stdscr)
+
+
+def connect() -> Client:
     host = '127.0.0.1'
     port = 22
     logger.info('Connecting to %s', host)
     client = Client(host, port=port, x11=True, term='xterm-256color', known_hosts_policy="auto")
     client.connect()
-    Terminal(client, stdscr)
+    return client
 
 
 if __name__ == "__main__":
-    curses.wrapper(main)
+    client = connect()
+    curses.wrapper(main, client)

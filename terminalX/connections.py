@@ -112,6 +112,32 @@ class Client:
     def connect_with_proxy_command(self) -> ProxyCommand:
         return ProxyCommand(self.proxy_command)
 
+    def auth_interactive_dumb(self, username: str, handler: Callable[[str, str, list], list[str]] = None,
+                              submethods: str = ""):
+        """
+        Autenticate to the server interactively but dumber.
+        Just print the prompt and / or instructions to stdout and send back
+        the response. This is good for situations where partial auth is
+        achieved by key and then the user has to enter a 2fac token.
+        Alternative to built in function, using getpass instead of input
+        Perhaps should be PR to Paramiko to use getpass instead of input
+        """
+
+        if not handler:
+
+            def handler(title, instructions, prompt_list):
+                answers = []
+                if title:
+                    print(title.strip())
+                if instructions:
+                    print(instructions.strip())
+                for prompt, show_input in prompt_list:
+                    print(prompt.strip(), end=" ")
+                    answers.append(getpass.getpass(prompt))
+                return answers
+
+        return self.transport.auth_interactive(username, handler, submethods)
+
     def connect(self, passphrase: str = None, password: str = None, sock: socket.socket = None,
                 jump_hosts_passwords: dict[str, ProxyJumpPasswords] = None,
                 interactive_login_handler: Callable[[str, str, list[str]], list[str]] = None,
@@ -181,10 +207,7 @@ class Client:
             if not self.transport or not self.transport.is_active():
                 raise           # Connection error not related to authentication
             try:
-                if interactive_login_handler:
-                    self.transport.auth_interactive(self.username, interactive_login_handler)
-                else:
-                    self.transport.auth_interactive_dumb(self.username)
+                self.auth_interactive_dumb(self.username, handler=interactive_login_handler)
             except paramiko.BadAuthenticationType as e:
                 if "password" in str(e) and not password and ask_password_callback:
                     password = ask_password_callback(self.username)
