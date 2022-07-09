@@ -19,12 +19,13 @@ def find_terminal_lines(display: list[str]) -> list[str]:
 
 def test_ssh_terminal(ssh_client_connected):
     ssh_client_connected.invoke_shell()
+    time.sleep(2)
     screen = ssh_client_connected.display_screen()
     assert screen
     line_changes = ssh_client_connected.display_screen_line_changes()
     assert len(line_changes) == len(screen)
     ssh_client_connected.send('echo Hello World')
-    time.sleep(180)
+    time.sleep(2)
     screen = ssh_client_connected.display_screen()
     terminal_lines = find_terminal_lines(screen)
     assert "echo Hello World" in terminal_lines[-1]

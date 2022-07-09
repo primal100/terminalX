@@ -56,7 +56,7 @@ class Client:
     name: str = None
     username: str = field(default_factory=getpass.getuser)
     key_filename: File = None
-    timeout: int = None
+    timeout: int = 5
     allow_agent: bool = False           # True when https://github.com/paramiko/paramiko/pull/2010 is merged
     look_for_keys: bool = True,
     compress: bool = False
